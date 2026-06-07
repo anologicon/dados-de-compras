@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "compras-crawler"
+version = "0.1.0"
+description = "Compras.gov.br data crawler and sync pipeline"
+requires-python = ">=3.10"
+dependencies = [
+  "duckdb>=1.1.3",
+  "pytest>=8.0.0",
+  "python-dotenv>=1.0.1",
+  "requests>=2.32.3",
+]
+
+[project.scripts]
+compras-crawler = "compras_crawler.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
