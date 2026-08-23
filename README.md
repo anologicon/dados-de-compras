@@ -29,7 +29,7 @@
 
 ## CLI usage
 ```bash
-compras-crawler sync --db-path compras.duckdb
+compras-crawler sync --db-path compras.duckdb --ops-db-path compras_ops.sqlite
 ```
 Default output is a friendly live console UI with progress, ETA, spinner, and colors.
 

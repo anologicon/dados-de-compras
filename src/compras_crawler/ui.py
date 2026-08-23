@@ -14,6 +14,7 @@ import threading
 class RunContext:
     run_id: str
     db_path: Path
+    ops_db_path: Path
     base_url: str
     scope: str
     start_date: str | None
@@ -52,7 +53,8 @@ class ConsoleUI:
         self._total_jobs = max(ctx.total_jobs, 1)
         self._write_line(self._style("compras-crawler sync", "cyan", bold=True))
         self._write_line(f"run id:   {ctx.run_id}")
-        self._write_line(f"db path:  {ctx.db_path}")
+        self._write_line(f"data db:  {ctx.db_path}")
+        self._write_line(f"ops db:   {ctx.ops_db_path}")
         self._write_line(f"base url: {ctx.base_url}")
         self._write_line(f"scope:    {ctx.scope}")
         if ctx.start_date or ctx.end_date:

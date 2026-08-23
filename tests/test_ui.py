@@ -14,6 +14,7 @@ def test_console_ui_renders_run_summary():
         ctx=RunContext(
             run_id="run-1",
             db_path=Path("compras.duckdb"),
+            ops_db_path=Path("compras_ops.sqlite"),
             base_url="https://dadosabertos.compras.gov.br",
             scope="historical",
             start_date="2024-01-01",
@@ -31,6 +32,8 @@ def test_console_ui_renders_run_summary():
     output = stream.getvalue()
     assert "compras-crawler sync" in output
     assert "run id:   run-1" in output
+    assert "data db:  compras.duckdb" in output
+    assert "ops db:   compras_ops.sqlite" in output
     assert "▶ [1/2] uasg_true (uasg)" in output
     assert "✓ [1] uasg_true done" in output
     assert "FINISHED: run run-1" in output

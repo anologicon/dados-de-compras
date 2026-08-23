@@ -18,7 +18,8 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     sync_parser = subparsers.add_parser("sync", help="Run the Compras.gov.br sync pipeline")
-    sync_parser.add_argument("--db-path", type=Path, default=Path("compras.duckdb"), help="DuckDB file path")
+    sync_parser.add_argument("--db-path", type=Path, default=Path("compras.duckdb"), help="DuckDB file path for synced data")
+    sync_parser.add_argument("--ops-db-path", type=Path, default=None, help="SQLite file path for operation metadata")
     sync_parser.add_argument("--base-url", default="https://dadosabertos.compras.gov.br", help="API base URL (must use https)")
     sync_parser.add_argument("--start-date", default=None, help="Historical start date (YYYY-MM-DD)")
     sync_parser.add_argument("--end-date", default=None, help="Historical end date (YYYY-MM-DD)")
@@ -51,6 +52,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         try:
             config = SyncConfig(
                 db_path=args.db_path,
+                ops_db_path=args.ops_db_path,
                 base_url=args.base_url,
                 token=os.getenv("COMPRAS_GOV_TOKEN"),
                 start_date=args.start_date,

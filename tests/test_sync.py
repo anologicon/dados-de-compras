@@ -18,7 +18,8 @@ class FakeClient:
 
 
 def test_sync_runner_lands_and_publishes_rows(tmp_path: Path):
-    db_path = tmp_path / "compras.duckdb"
+    data_db_path = tmp_path / "compras.duckdb"
+    ops_db_path = tmp_path / "compras_ops.sqlite"
     job = EndpointJob(
         name="uasg_status_true",
         operation_id="consultarUasg",
@@ -43,7 +44,7 @@ def test_sync_runner_lands_and_publishes_rows(tmp_path: Path):
         }
     )
     runner = SyncRunner(
-        config=SyncConfig(db_path=db_path, base_url="https://dadosabertos.compras.gov.br", resume=True),
+        config=SyncConfig(db_path=data_db_path, ops_db_path=ops_db_path, base_url="https://dadosabertos.compras.gov.br", resume=True),
         client=client,
         jobs=(job,),
     )
@@ -54,4 +55,5 @@ def test_sync_runner_lands_and_publishes_rows(tmp_path: Path):
     with runner.warehouse.connect() as con:
         assert con.execute("select count(*) from bronze_pages").fetchone()[0] == 1
         assert con.execute("select count(*) from silver_records").fetchone()[0] == 1
+    with runner.ops_store.connect() as con:
         assert con.execute("select status from ops_runs where run_id = ?", [run_id]).fetchone()[0] == "finished"

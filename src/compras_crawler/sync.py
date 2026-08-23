@@ -10,12 +10,13 @@ from .log import get_logger
 from .manifest import EndpointJob, build_historical_manifest, default_date_window
 from .ui import RunContext
 from .normalize import extract_records, normalize_records, stable_hash, stable_json
-from .storage import DuckWarehouse
+from .storage import DuckWarehouse, SqliteOpsStore
 
 
 @dataclass(frozen=True)
 class SyncConfig:
     db_path: Path
+    ops_db_path: Path | None = None
     base_url: str = "https://dadosabertos.compras.gov.br"
     token: str | None = None
     start_date: str | None = None
@@ -27,6 +28,7 @@ class SyncConfig:
     state_uf: str | None = None
     municipality_code: int | None = None
     pncp_modalidade_code: int | None = None
+    pncp_modalidade_codes: tuple[int, ...] = ()
 
     def __post_init__(self) -> None:
         validate_base_url(self.base_url, token=self.token)
@@ -34,16 +36,27 @@ class SyncConfig:
             object.__setattr__(self, "state_uf", self.state_uf.strip().upper())
             if len(self.state_uf) != 2:
                 raise ValueError("state_uf must be a 2-letter UF abbreviation")
+        codes = tuple(self.pncp_modalidade_codes)
+        if not codes and self.pncp_modalidade_code is not None:
+            codes = (self.pncp_modalidade_code,)
+        elif codes and self.pncp_modalidade_code is not None and self.pncp_modalidade_code not in codes:
+            codes = (self.pncp_modalidade_code, *codes)
+        object.__setattr__(self, "pncp_modalidade_codes", codes)
+        object.__setattr__(self, "pncp_modalidade_code", codes[0] if codes else None)
         pncp_selected = "consultarContratacoes_PNCP_14133" in self.endpoints
         if self.municipality_code is not None:
             if self.state_uf is None:
                 raise ValueError("municipality_code requires state_uf")
             if not pncp_selected:
                 raise ValueError("municipality_code requires operation consultarContratacoes_PNCP_14133")
-            if self.pncp_modalidade_code is None:
+            if not self.pncp_modalidade_codes:
                 raise ValueError("municipality_code requires pncp_modalidade_code")
-        if self.pncp_modalidade_code is not None and not pncp_selected:
+        if self.pncp_modalidade_codes and not pncp_selected:
             raise ValueError("pncp_modalidade_code requires operation consultarContratacoes_PNCP_14133")
+        if pncp_selected and not self.pncp_modalidade_codes:
+            raise ValueError("consultarContratacoes_PNCP_14133 requires pncp_modalidade_code")
+        if self.ops_db_path is None:
+            object.__setattr__(self, "ops_db_path", self.db_path.with_name(f"{self.db_path.stem}_ops.sqlite"))
 
     def resolved_dates(self) -> tuple[str, str]:
         if self.start_date and self.end_date:
@@ -70,20 +83,23 @@ class SyncRunner:
             endpoints=config.endpoints or None,
             state_uf=config.state_uf,
             municipality_code=config.municipality_code,
-            pncp_modalidade_code=config.pncp_modalidade_code,
+            pncp_modalidade_codes=config.pncp_modalidade_codes,
         )
         self.warehouse = DuckWarehouse(config.db_path)
+        self.ops_store = SqliteOpsStore(config.ops_db_path)
         self.logger = get_logger("sync")
         self.reporter = reporter
 
     def run(self) -> str:
         self.warehouse.init_schema()
-        run_id = self.warehouse.start_run(base_url=self.config.base_url, scope=self.config.scope)
+        self.ops_store.init_schema()
+        run_id = self.ops_store.start_run(base_url=self.config.base_url, scope=self.config.scope, data_db_path=self.config.db_path)
         self._notify(
             "start",
             ctx=RunContext(
                 run_id=run_id,
                 db_path=self.config.db_path,
+                ops_db_path=self.config.ops_db_path,
                 base_url=self.config.base_url,
                 scope=self.config.scope,
                 start_date=self.config.start_date,
@@ -103,7 +119,7 @@ class SyncRunner:
         try:
             for index, job in enumerate(self.jobs, start=1):
                 self._run_job(run_id, job, index=index, total=len(self.jobs))
-            self.warehouse.finish_run(run_id, status="finished")
+            self.ops_store.finish_run(run_id, status="finished")
             self.logger.info("run finished run_id=%s status=finished", run_id)
             self._notify("run_finished", run_id=run_id, status="finished")
             return run_id
@@ -114,14 +130,14 @@ class SyncRunner:
                 getattr(exc, "job_name", "sync"),
                 getattr(exc, "page_number", None),
             )
-            self.warehouse.record_error(
+            self.ops_store.record_error(
                 run_id=run_id,
                 job_name=getattr(exc, "job_name", "sync"),
                 page_number=getattr(exc, "page_number", None),
                 message=str(exc),
                 payload_json=None,
             )
-            self.warehouse.finish_run(run_id, status="failed")
+            self.ops_store.finish_run(run_id, status="failed")
             self._notify(
                 "run_failed",
                 run_id=run_id,
@@ -132,7 +148,7 @@ class SyncRunner:
             raise
 
     def _run_job(self, run_id: str, job: EndpointJob, *, index: int, total: int) -> None:
-        start_page = self.warehouse.load_checkpoint(job.name) if self.config.resume else None
+        start_page = self.ops_store.load_checkpoint(job.name) if self.config.resume else None
         page = start_page or 1
         self._notify(
             "job_started",
@@ -192,7 +208,7 @@ class SyncRunner:
                     source_page=page_data.page_number,
                 )
                 self.warehouse.upsert_records(normalized)
-                self.warehouse.save_checkpoint(job.name, next_page=page_data.page_number + 1, payload_hash=stable_hash(page_data.raw))
+                self.ops_store.save_checkpoint(job.name, next_page=page_data.page_number + 1, payload_hash=stable_hash(page_data.raw))
                 self._notify(
                     "page_done",
                     job_name=job.name,
@@ -234,7 +250,7 @@ class SyncRunner:
                     source_page=page_data.page_number,
                 )
                 self.warehouse.upsert_records(normalized)
-                self.warehouse.save_checkpoint(job.name, next_page=page_data.page_number + 1, payload_hash=stable_hash(page_data.raw))
+                self.ops_store.save_checkpoint(job.name, next_page=page_data.page_number + 1, payload_hash=stable_hash(page_data.raw))
                 self._notify(
                     "page_done",
                     job_name=job.name,

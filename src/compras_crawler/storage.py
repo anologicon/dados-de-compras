@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+import sqlite3
 import uuid
 
 import duckdb
@@ -50,59 +51,6 @@ class DuckWarehouse:
                     PRIMARY KEY (entity_name, record_key)
                 )
                 """
-            )
-            con.execute(
-                """
-                CREATE TABLE IF NOT EXISTS ops_runs (
-                    run_id TEXT PRIMARY KEY,
-                    started_at TIMESTAMP,
-                    finished_at TIMESTAMP,
-                    status TEXT,
-                    base_url TEXT,
-                    db_path TEXT,
-                    scope TEXT
-                )
-                """
-            )
-            con.execute(
-                """
-                CREATE TABLE IF NOT EXISTS ops_checkpoints (
-                    job_name TEXT PRIMARY KEY,
-                    next_page INTEGER,
-                    payload_hash TEXT,
-                    updated_at TIMESTAMP
-                )
-                """
-            )
-            con.execute(
-                """
-                CREATE TABLE IF NOT EXISTS ops_errors (
-                    run_id TEXT,
-                    job_name TEXT,
-                    page_number INTEGER,
-                    message TEXT,
-                    payload_json TEXT,
-                    created_at TIMESTAMP
-                )
-                """
-            )
-
-    def start_run(self, *, base_url: str, scope: str) -> str:
-        run_id = str(uuid.uuid4())
-        started_at = datetime.now(tz=timezone.utc)
-        with self.connect() as con:
-            con.execute(
-                "INSERT INTO ops_runs (run_id, started_at, finished_at, status, base_url, db_path, scope) VALUES (?, ?, NULL, ?, ?, ?, ?)",
-                [run_id, started_at, "running", base_url, str(self.db_path), scope],
-            )
-        return run_id
-
-    def finish_run(self, run_id: str, *, status: str) -> None:
-        finished_at = datetime.now(tz=timezone.utc)
-        with self.connect() as con:
-            con.execute(
-                "UPDATE ops_runs SET finished_at = ?, status = ? WHERE run_id = ?",
-                [finished_at, status, run_id],
             )
 
     def land_page(
@@ -173,8 +121,74 @@ class DuckWarehouse:
                 con.execute("ROLLBACK")
                 raise
 
+
+class SqliteOpsStore:
+    def __init__(self, db_path: str | Path):
+        self.db_path = Path(db_path)
+
+    def connect(self):
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        return sqlite3.connect(str(self.db_path))
+
+    def init_schema(self) -> None:
+        with self.connect() as con:
+            con.execute(
+                """
+                CREATE TABLE IF NOT EXISTS ops_runs (
+                    run_id TEXT PRIMARY KEY,
+                    started_at TEXT,
+                    finished_at TEXT,
+                    status TEXT,
+                    base_url TEXT,
+                    data_db_path TEXT,
+                    ops_db_path TEXT,
+                    scope TEXT
+                )
+                """
+            )
+            con.execute(
+                """
+                CREATE TABLE IF NOT EXISTS ops_checkpoints (
+                    job_name TEXT PRIMARY KEY,
+                    next_page INTEGER,
+                    payload_hash TEXT,
+                    updated_at TEXT
+                )
+                """
+            )
+            con.execute(
+                """
+                CREATE TABLE IF NOT EXISTS ops_errors (
+                    run_id TEXT,
+                    job_name TEXT,
+                    page_number INTEGER,
+                    message TEXT,
+                    payload_json TEXT,
+                    created_at TEXT
+                )
+                """
+            )
+
+    def start_run(self, *, base_url: str, scope: str, data_db_path: str | Path) -> str:
+        run_id = str(uuid.uuid4())
+        started_at = datetime.now(tz=timezone.utc).isoformat()
+        with self.connect() as con:
+            con.execute(
+                "INSERT INTO ops_runs (run_id, started_at, finished_at, status, base_url, data_db_path, ops_db_path, scope) VALUES (?, ?, NULL, ?, ?, ?, ?, ?)",
+                [run_id, started_at, "running", base_url, str(Path(data_db_path)), str(self.db_path), scope],
+            )
+        return run_id
+
+    def finish_run(self, run_id: str, *, status: str) -> None:
+        finished_at = datetime.now(tz=timezone.utc).isoformat()
+        with self.connect() as con:
+            con.execute(
+                "UPDATE ops_runs SET finished_at = ?, status = ? WHERE run_id = ?",
+                [finished_at, status, run_id],
+            )
+
     def save_checkpoint(self, job_name: str, *, next_page: int, payload_hash: str | None = None) -> None:
-        updated_at = datetime.now(tz=timezone.utc)
+        updated_at = datetime.now(tz=timezone.utc).isoformat()
         with self.connect() as con:
             con.execute("DELETE FROM ops_checkpoints WHERE job_name = ?", [job_name])
             con.execute(
@@ -188,7 +202,7 @@ class DuckWarehouse:
             return int(row[0]) if row else None
 
     def record_error(self, *, run_id: str, job_name: str, page_number: int | None, message: str, payload_json: str | None) -> None:
-        created_at = datetime.now(tz=timezone.utc)
+        created_at = datetime.now(tz=timezone.utc).isoformat()
         with self.connect() as con:
             con.execute(
                 "INSERT INTO ops_errors VALUES (?, ?, ?, ?, ?, ?)",
