@@ -45,7 +45,7 @@ Useful flags:
 - `--page-size`
 - `--operation consultarUasg|consultarLicitacao|consultarContratacoes_PNCP_14133|...` (repeatable)
 - `--state-uf SP` to restrict supported jobs by UF
-- `--municipality-code 3550308` + `--pncp-modalidade-code 8` for a city-specific PNCP run
+- `--municipality-code 3550308` + repeatable `--pncp-modalidade-code` values for city-specific PNCP runs
 - `--list-operations` to preview what will run
 - `--no-resume`
 - `--log-level DEBUG|INFO|WARNING|ERROR|CRITICAL`

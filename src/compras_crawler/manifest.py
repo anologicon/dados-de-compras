@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, timedelta
-from typing import Any
+from typing import Any, Callable
 
 
 @dataclass(frozen=True)
@@ -24,6 +24,42 @@ class OperationSpec:
     entity_name: str
     job_names: tuple[str, ...]
     accepts: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class MunicipalityPurchaseRequest:
+    start_date: str
+    end_date: str
+    municipality_code: int | None = None
+    state_uf: str | None = None
+    sources: tuple[str, ...] = ("pncp",)
+    pncp_modalidade_code: int | None = None
+    pncp_modalidade_codes: tuple[int, ...] = ()
+
+    def __post_init__(self) -> None:
+        normalized_sources: list[str] = []
+        seen_sources: set[str] = set()
+        for source in self.sources:
+            normalized = source.strip().lower()
+            if not normalized or normalized in seen_sources:
+                continue
+            normalized_sources.append(normalized)
+            seen_sources.add(normalized)
+        if not normalized_sources:
+            raise ValueError("sources must not be empty")
+        object.__setattr__(self, "sources", tuple(normalized_sources))
+        if self.state_uf is not None:
+            object.__setattr__(self, "state_uf", self.state_uf.strip().upper())
+        codes = tuple(self.pncp_modalidade_codes)
+        if not codes and self.pncp_modalidade_code is not None:
+            codes = (self.pncp_modalidade_code,)
+        elif codes and self.pncp_modalidade_code is not None and self.pncp_modalidade_code not in codes:
+            codes = (self.pncp_modalidade_code, *codes)
+        object.__setattr__(self, "pncp_modalidade_codes", codes)
+        object.__setattr__(self, "pncp_modalidade_code", codes[0] if codes else None)
+
+
+MunicipalityPurchaseSourceBuilder = Callable[[MunicipalityPurchaseRequest], tuple[EndpointJob, ...]]
 
 
 def _boolean_jobs(
@@ -83,8 +119,72 @@ def _with_page_size(job: EndpointJob, page_size: int | None) -> EndpointJob:
     )
 
 
-def _pncp_requested(endpoints: tuple[str, ...] | None, pncp_modalidade_code: int | None) -> bool:
-    if pncp_modalidade_code is not None:
+def _build_pncp_purchase_jobs(request: MunicipalityPurchaseRequest) -> tuple[EndpointJob, ...]:
+    if not request.pncp_modalidade_codes:
+        raise ValueError("pncp source requires pncp_modalidade_code")
+    jobs: list[EndpointJob] = []
+    for pncp_modalidade_code in request.pncp_modalidade_codes:
+        pncp_params: dict[str, Any] = {
+            "dataPublicacaoPncpInicial": request.start_date,
+            "dataPublicacaoPncpFinal": request.end_date,
+            "codigoModalidade": pncp_modalidade_code,
+        }
+        if request.state_uf is not None:
+            pncp_params["unidadeOrgaoUfSigla"] = request.state_uf
+        if request.municipality_code is not None:
+            pncp_params["unidadeOrgaoCodigoIbge"] = request.municipality_code
+        jobs.append(
+            EndpointJob(
+                name=f"pncp_14133_{pncp_modalidade_code}",
+                operation_id="consultarContratacoes_PNCP_14133",
+                path="/modulo-contratacoes/1_consultarContratacoes_PNCP_14133",
+                entity_name="pncp_contratacao",
+                key_fields=("idCompra", "numeroControlePNCP"),
+                base_params=pncp_params,
+                supports_page_size=True,
+            )
+        )
+    return tuple(jobs)
+
+
+MUNICIPALITY_PURCHASE_SOURCE_BUILDERS: dict[str, MunicipalityPurchaseSourceBuilder] = {
+    "pncp": _build_pncp_purchase_jobs,
+}
+
+
+def build_municipality_purchase_manifest(
+    start_date: str,
+    end_date: str,
+    *,
+    municipality_code: int,
+    state_uf: str | None = None,
+    sources: tuple[str, ...] = ("pncp",),
+    pncp_modalidade_code: int | None = None,
+    pncp_modalidade_codes: tuple[int, ...] = (),
+) -> tuple[EndpointJob, ...]:
+    request = MunicipalityPurchaseRequest(
+        start_date=start_date,
+        end_date=end_date,
+        municipality_code=municipality_code,
+        state_uf=state_uf,
+        sources=sources,
+        pncp_modalidade_code=pncp_modalidade_code,
+        pncp_modalidade_codes=pncp_modalidade_codes,
+    )
+    jobs: list[EndpointJob] = []
+    for source in request.sources:
+        builder = MUNICIPALITY_PURCHASE_SOURCE_BUILDERS.get(source)
+        if builder is None:
+            raise ValueError(f"Unknown municipality purchase source: {source}")
+        jobs.extend(builder(request))
+    return tuple(jobs)
+
+
+build_city_purchase_manifest = build_municipality_purchase_manifest
+
+
+def _pncp_requested(endpoints: tuple[str, ...] | None, pncp_modalidade_codes: tuple[int, ...]) -> bool:
+    if pncp_modalidade_codes:
         return True
     if not endpoints:
         return False
@@ -113,6 +213,7 @@ def build_historical_manifest(
     state_uf: str | None = None,
     municipality_code: int | None = None,
     pncp_modalidade_code: int | None = None,
+    pncp_modalidade_codes: tuple[int, ...] = (),
 ) -> tuple[EndpointJob, ...]:
     jobs: list[EndpointJob] = [
         *_boolean_jobs("uasg", "consultarUasg", "/modulo-uasg/1_consultarUasg", "uasg", ("codigoUasg", "codigo_uasg"), "statusUasg", supports_page_size=False),
@@ -147,27 +248,22 @@ def build_historical_manifest(
             )
             for job in jobs
         ]
-    if _pncp_requested(endpoints, pncp_modalidade_code):
-        if pncp_modalidade_code is None:
+    if not pncp_modalidade_codes and pncp_modalidade_code is not None:
+        pncp_modalidade_codes = (pncp_modalidade_code,)
+    elif pncp_modalidade_codes and pncp_modalidade_code is not None and pncp_modalidade_code not in pncp_modalidade_codes:
+        pncp_modalidade_codes = (pncp_modalidade_code, *pncp_modalidade_codes)
+    if _pncp_requested(endpoints, pncp_modalidade_codes):
+        if not pncp_modalidade_codes:
             raise ValueError("consultarContratacoes_PNCP_14133 requires pncp_modalidade_code")
-        pncp_params: dict[str, Any] = {
-            "dataPublicacaoPncpInicial": start_date,
-            "dataPublicacaoPncpFinal": end_date,
-            "codigoModalidade": pncp_modalidade_code,
-        }
-        if state_uf is not None:
-            pncp_params["unidadeOrgaoUfSigla"] = state_uf
-        if municipality_code is not None:
-            pncp_params["unidadeOrgaoCodigoIbge"] = municipality_code
-        jobs.append(
-            EndpointJob(
-                name="pncp_14133",
-                operation_id="consultarContratacoes_PNCP_14133",
-                path="/modulo-contratacoes/1_consultarContratacoes_PNCP_14133",
-                entity_name="pncp_contratacao",
-                key_fields=("idCompra", "numeroControlePNCP"),
-                base_params=pncp_params,
-                supports_page_size=True,
+        jobs.extend(
+            _build_pncp_purchase_jobs(
+                MunicipalityPurchaseRequest(
+                    start_date=start_date,
+                    end_date=end_date,
+                    municipality_code=municipality_code,
+                    state_uf=state_uf,
+                    pncp_modalidade_codes=pncp_modalidade_codes,
+                )
             )
         )
     if endpoints:

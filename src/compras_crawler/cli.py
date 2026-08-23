@@ -27,7 +27,7 @@ def build_parser() -> argparse.ArgumentParser:
     sync_parser.add_argument("--scope", default="historical", help="Sync scope label")
     sync_parser.add_argument("--state-uf", default=None, help="UF abbreviation to restrict supported jobs (for example, SP)")
     sync_parser.add_argument("--municipality-code", type=int, default=None, help="IBGE municipality code for city-specific PNCP runs")
-    sync_parser.add_argument("--pncp-modalidade-code", type=int, default=None, help="Required modality code for PNCP location-filtered runs")
+    sync_parser.add_argument("--pncp-modalidade-code", type=int, action="append", default=[], help="Repeatable modality code for PNCP location-filtered runs")
     sync_parser.add_argument("--operation", action="append", default=[], metavar="OPERATION_ID", help="Sync one or more Swagger/OpenAPI operationIds; repeatable")
     sync_parser.add_argument("--endpoint", action="append", default=[], metavar="NAME", help=argparse.SUPPRESS)
     sync_parser.add_argument("--list-operations", action="store_true", help="List available Swagger-style operations and exit")
@@ -63,7 +63,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 scope=args.scope,
                 state_uf=args.state_uf,
                 municipality_code=args.municipality_code,
-                pncp_modalidade_code=args.pncp_modalidade_code,
+                pncp_modalidade_codes=tuple(args.pncp_modalidade_code),
             )
         except ValueError as exc:
             parser.error(str(exc))
@@ -75,7 +75,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 endpoints=config.endpoints or None,
                 state_uf=config.state_uf,
                 municipality_code=config.municipality_code,
-                pncp_modalidade_code=config.pncp_modalidade_code,
+                pncp_modalidade_codes=config.pncp_modalidade_codes,
             )
             catalog = build_operation_catalog(jobs)
             for spec in catalog:
