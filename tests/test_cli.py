@@ -53,6 +53,7 @@ def test_cli_sync_invokes_runner(monkeypatch, tmp_path: Path):
     assert captured["config"].state_uf == "SP"
     assert captured["config"].municipality_code == 3550308
     assert captured["config"].pncp_modalidade_codes == (8, 10)
+    assert captured["config"].purchase_sources == ()
 
 
 def test_cli_loads_token_from_dotenv(monkeypatch, tmp_path: Path):
@@ -116,7 +117,39 @@ def test_cli_rejects_unsafe_tokened_base_url(monkeypatch, tmp_path: Path):
         ])
 
 
-def test_cli_rejects_city_filter_without_pncp_operation(monkeypatch, tmp_path: Path):
+def test_cli_uses_municipality_purchase_mode(monkeypatch, tmp_path: Path):
+    dummy = DummyRunner()
+    captured = {}
+    monkeypatch.setenv("COMPRAS_GOV_TOKEN", "abc")
+
+    def fake_build_runner(config, reporter=None):
+        captured["config"] = config
+        return dummy
+
+    monkeypatch.setattr(cli, "build_runner", fake_build_runner)
+
+    exit_code = cli.main([
+        "sync",
+        "--db-path",
+        str(tmp_path / "compras.duckdb"),
+        "--state-uf",
+        "SC",
+        "--municipality-code",
+        "4202909",
+        "--pncp-modalidade-code",
+        "8",
+    ])
+
+    assert exit_code == 0
+    assert dummy.ran is True
+    assert captured["config"].municipality_code == 4202909
+    assert captured["config"].state_uf == "SC"
+    assert captured["config"].purchase_sources == ("pncp",)
+    assert captured["config"].endpoints == ()
+    assert captured["config"].pncp_modalidade_codes == (8,)
+
+
+def test_cli_rejects_purchase_source_with_operation(monkeypatch, tmp_path: Path):
     monkeypatch.setenv("COMPRAS_GOV_TOKEN", "abc")
     with pytest.raises(SystemExit):
         cli.main([
@@ -124,9 +157,11 @@ def test_cli_rejects_city_filter_without_pncp_operation(monkeypatch, tmp_path: P
             "--db-path",
             str(tmp_path / "compras.duckdb"),
             "--state-uf",
-            "SP",
+            "SC",
             "--municipality-code",
-            "3550308",
-            "--pncp-modalidade-code",
-            "8",
+            "4202909",
+            "--source",
+            "pncp",
+            "--operation",
+            "consultarUasg",
         ])

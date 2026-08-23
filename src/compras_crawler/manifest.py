@@ -161,6 +161,7 @@ def build_municipality_purchase_manifest(
     sources: tuple[str, ...] = ("pncp",),
     pncp_modalidade_code: int | None = None,
     pncp_modalidade_codes: tuple[int, ...] = (),
+    page_size: int | None = None,
 ) -> tuple[EndpointJob, ...]:
     request = MunicipalityPurchaseRequest(
         start_date=start_date,
@@ -177,7 +178,7 @@ def build_municipality_purchase_manifest(
         if builder is None:
             raise ValueError(f"Unknown municipality purchase source: {source}")
         jobs.extend(builder(request))
-    return tuple(jobs)
+    return tuple(_with_page_size(job, page_size) for job in jobs)
 
 
 build_city_purchase_manifest = build_municipality_purchase_manifest

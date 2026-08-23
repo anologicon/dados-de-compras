@@ -37,6 +37,10 @@ Swagger-style example:
 ```bash
 compras-crawler sync --operation consultarUasg --start-date 2024-01-01 --end-date 2024-01-31
 ```
+Municipality-specific purchases:
+```bash
+compras-crawler sync --municipality-code 4202909 --state-uf SC --source pncp --pncp-modalidade-code 8
+```
 
 Useful flags:
 - `--base-url` (HTTPS only)
@@ -45,7 +49,7 @@ Useful flags:
 - `--page-size`
 - `--operation consultarUasg|consultarLicitacao|consultarContratacoes_PNCP_14133|...` (repeatable)
 - `--state-uf SP` to restrict supported jobs by UF
-- `--municipality-code 3550308` + repeatable `--pncp-modalidade-code` values for city-specific PNCP runs
+- `--municipality-code 3550308` + `--source pncp` + repeatable `--pncp-modalidade-code` values for city-specific purchase runs
 - `--list-operations` to preview what will run
 - `--no-resume`
 - `--log-level DEBUG|INFO|WARNING|ERROR|CRITICAL`

@@ -8,8 +8,8 @@ from typing import Sequence
 from dotenv import load_dotenv
 
 from .log import configure_logging
-from .manifest import build_historical_manifest, build_operation_catalog, default_date_window
-from .sync import SyncConfig, build_runner
+from .manifest import build_operation_catalog, default_date_window
+from .sync import SyncConfig, build_jobs_for_config, build_runner
 from .ui import ConsoleUI
 
 
@@ -26,7 +26,8 @@ def build_parser() -> argparse.ArgumentParser:
     sync_parser.add_argument("--page-size", type=int, default=None, help="Optional server page size")
     sync_parser.add_argument("--scope", default="historical", help="Sync scope label")
     sync_parser.add_argument("--state-uf", default=None, help="UF abbreviation to restrict supported jobs (for example, SP)")
-    sync_parser.add_argument("--municipality-code", type=int, default=None, help="IBGE municipality code for city-specific PNCP runs")
+    sync_parser.add_argument("--municipality-code", type=int, default=None, help="IBGE municipality code for city-specific purchase runs")
+    sync_parser.add_argument("--source", "--purchase-source", dest="purchase_sources", action="append", default=[], help="Repeatable municipality purchase source (currently: pncp)")
     sync_parser.add_argument("--pncp-modalidade-code", type=int, action="append", default=[], help="Repeatable modality code for PNCP location-filtered runs")
     sync_parser.add_argument("--operation", action="append", default=[], metavar="OPERATION_ID", help="Sync one or more Swagger/OpenAPI operationIds; repeatable")
     sync_parser.add_argument("--endpoint", action="append", default=[], metavar="NAME", help=argparse.SUPPRESS)
@@ -49,6 +50,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         start_date = args.start_date or default_date_window()[0]
         end_date = args.end_date or default_date_window()[1]
         selectors = tuple(args.operation) + tuple(args.endpoint)
+        purchase_sources = tuple(args.purchase_sources)
+        if purchase_sources and selectors:
+            parser.error("--source/--purchase-source cannot be combined with --operation/--endpoint")
         try:
             config = SyncConfig(
                 db_path=args.db_path,
@@ -64,19 +68,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                 state_uf=args.state_uf,
                 municipality_code=args.municipality_code,
                 pncp_modalidade_codes=tuple(args.pncp_modalidade_code),
+                purchase_sources=purchase_sources,
             )
         except ValueError as exc:
             parser.error(str(exc))
         if args.list_operations or args.list_endpoints:
-            jobs = build_historical_manifest(
-                start_date,
-                end_date,
-                page_size=config.page_size,
-                endpoints=config.endpoints or None,
-                state_uf=config.state_uf,
-                municipality_code=config.municipality_code,
-                pncp_modalidade_codes=config.pncp_modalidade_codes,
-            )
+            jobs = build_jobs_for_config(config)
             catalog = build_operation_catalog(jobs)
             for spec in catalog:
                 print(f"{spec.operation_id}\t{spec.entity_name}\t{spec.path}\tjobs={','.join(spec.job_names)}")

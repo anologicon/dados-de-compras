@@ -7,7 +7,7 @@ from typing import Any
 
 from .client import ComprasClient, validate_base_url
 from .log import get_logger
-from .manifest import EndpointJob, build_historical_manifest, default_date_window
+from .manifest import EndpointJob, build_historical_manifest, build_municipality_purchase_manifest, default_date_window
 from .ui import RunContext
 from .normalize import extract_records, normalize_records, stable_hash, stable_json
 from .storage import DuckWarehouse, SqliteOpsStore
@@ -29,6 +29,7 @@ class SyncConfig:
     municipality_code: int | None = None
     pncp_modalidade_code: int | None = None
     pncp_modalidade_codes: tuple[int, ...] = ()
+    purchase_sources: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         validate_base_url(self.base_url, token=self.token)
@@ -36,6 +37,17 @@ class SyncConfig:
             object.__setattr__(self, "state_uf", self.state_uf.strip().upper())
             if len(self.state_uf) != 2:
                 raise ValueError("state_uf must be a 2-letter UF abbreviation")
+
+        sources: list[str] = []
+        seen_sources: set[str] = set()
+        for source in self.purchase_sources:
+            normalized = source.strip().lower()
+            if not normalized or normalized in seen_sources:
+                continue
+            sources.append(normalized)
+            seen_sources.add(normalized)
+        object.__setattr__(self, "purchase_sources", tuple(sources))
+
         codes = tuple(self.pncp_modalidade_codes)
         if not codes and self.pncp_modalidade_code is not None:
             codes = (self.pncp_modalidade_code,)
@@ -43,18 +55,29 @@ class SyncConfig:
             codes = (self.pncp_modalidade_code, *codes)
         object.__setattr__(self, "pncp_modalidade_codes", codes)
         object.__setattr__(self, "pncp_modalidade_code", codes[0] if codes else None)
+
+        if self.purchase_sources and self.endpoints:
+            raise ValueError("purchase_sources cannot be combined with endpoints")
+
+        city_mode = bool(self.purchase_sources) or (self.municipality_code is not None and not self.endpoints)
         pncp_selected = "consultarContratacoes_PNCP_14133" in self.endpoints
+
         if self.municipality_code is not None:
             if self.state_uf is None:
                 raise ValueError("municipality_code requires state_uf")
-            if not pncp_selected:
-                raise ValueError("municipality_code requires operation consultarContratacoes_PNCP_14133")
-            if not self.pncp_modalidade_codes:
-                raise ValueError("municipality_code requires pncp_modalidade_code")
-        if self.pncp_modalidade_codes and not pncp_selected:
-            raise ValueError("pncp_modalidade_code requires operation consultarContratacoes_PNCP_14133")
-        if pncp_selected and not self.pncp_modalidade_codes:
-            raise ValueError("consultarContratacoes_PNCP_14133 requires pncp_modalidade_code")
+            if city_mode:
+                if not self.purchase_sources:
+                    object.__setattr__(self, "purchase_sources", ("pncp",))
+                if not self.pncp_modalidade_codes:
+                    raise ValueError("municipality_code requires pncp_modalidade_code")
+            else:
+                if self.pncp_modalidade_codes and not pncp_selected:
+                    raise ValueError("pncp_modalidade_code requires operation consultarContratacoes_PNCP_14133")
+                if pncp_selected and not self.pncp_modalidade_codes:
+                    raise ValueError("consultarContratacoes_PNCP_14133 requires pncp_modalidade_code")
+        elif self.purchase_sources:
+            raise ValueError("purchase_sources requires municipality_code")
+
         if self.ops_db_path is None:
             object.__setattr__(self, "ops_db_path", self.db_path.with_name(f"{self.db_path.stem}_ops.sqlite"))
 
@@ -75,16 +98,7 @@ class SyncRunner:
     ):
         self.config = config
         self.client = client or ComprasClient(config.base_url, token=config.token)
-        start_date, end_date = config.resolved_dates()
-        self.jobs = jobs or build_historical_manifest(
-            start_date,
-            end_date,
-            page_size=config.page_size,
-            endpoints=config.endpoints or None,
-            state_uf=config.state_uf,
-            municipality_code=config.municipality_code,
-            pncp_modalidade_codes=config.pncp_modalidade_codes,
-        )
+        self.jobs = jobs or build_jobs_for_config(config)
         self.warehouse = DuckWarehouse(config.db_path)
         self.ops_store = SqliteOpsStore(config.ops_db_path)
         self.logger = get_logger("sync")
@@ -288,6 +302,29 @@ class SyncRunner:
         params = dict(job.base_params)
         params["pagina"] = page
         return params
+
+
+def build_jobs_for_config(config: SyncConfig) -> tuple[EndpointJob, ...]:
+    start_date, end_date = config.resolved_dates()
+    if config.purchase_sources:
+        return build_municipality_purchase_manifest(
+            start_date,
+            end_date,
+            municipality_code=config.municipality_code,
+            state_uf=config.state_uf,
+            sources=config.purchase_sources,
+            pncp_modalidade_codes=config.pncp_modalidade_codes,
+            page_size=config.page_size,
+        )
+    return build_historical_manifest(
+        start_date,
+        end_date,
+        page_size=config.page_size,
+        endpoints=config.endpoints or None,
+        state_uf=config.state_uf,
+        municipality_code=config.municipality_code,
+        pncp_modalidade_codes=config.pncp_modalidade_codes,
+    )
 
 
 def build_runner(config: SyncConfig, reporter: Any | None = None) -> SyncRunner:

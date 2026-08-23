@@ -5,7 +5,7 @@ from pathlib import Path
 
 from compras_crawler.client import PageData
 from compras_crawler.manifest import EndpointJob
-from compras_crawler.sync import SyncConfig, SyncRunner
+from compras_crawler.sync import SyncConfig, SyncRunner, build_jobs_for_config
 
 
 @dataclass
@@ -15,6 +15,23 @@ class FakeClient:
     def iter_pages(self, path, params, accept="json", job_name=None):
         for page in self.pages_by_job[job_name]:
             yield page
+
+
+def test_build_jobs_for_config_uses_municipality_purchase_manifest(tmp_path: Path):
+    config = SyncConfig(
+        db_path=tmp_path / "compras.duckdb",
+        ops_db_path=tmp_path / "compras_ops.sqlite",
+        base_url="https://dadosabertos.compras.gov.br",
+        municipality_code=4202909,
+        state_uf="SC",
+        pncp_modalidade_codes=(8,),
+    )
+
+    jobs = build_jobs_for_config(config)
+
+    assert [job.name for job in jobs] == ["pncp_14133_8"]
+    assert jobs[0].base_params["unidadeOrgaoCodigoIbge"] == 4202909
+    assert config.purchase_sources == ("pncp",)
 
 
 def test_sync_runner_lands_and_publishes_rows(tmp_path: Path):
