@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from io import StringIO
 from time import sleep
+import asyncio
 import csv
 from typing import Any
 from urllib.parse import urljoin, urlparse
@@ -161,6 +162,52 @@ class ComprasClient:
             return []
         reader = csv.DictReader(StringIO(text))
         return [dict(row) for row in reader]
+
+
+class AsyncComprasClient:
+    """Async facade for concurrent page fetches.
+
+    This MVP keeps the proven ``requests`` implementation underneath and runs
+    each page fetch in a worker thread. A fresh ``requests.Session`` is created
+    per page fetch so concurrent workers do not share session state.
+    """
+
+    def __init__(
+        self,
+        base_url: str,
+        *,
+        token: str | None = None,
+        timeout: float = 30.0,
+        max_retries: int = 5,
+        retry_backoff_seconds: float = 2.0,
+    ):
+        validate_base_url(base_url, token=token)
+        self.base_url = base_url
+        self.token = token
+        self.timeout = timeout
+        self.max_retries = max_retries
+        self.retry_backoff_seconds = retry_backoff_seconds
+
+    async def fetch_page(
+        self,
+        path: str,
+        params: dict[str, Any],
+        *,
+        accept: str = "json",
+    ) -> PageData:
+        return await asyncio.to_thread(self._fetch_page_sync, path, dict(params), accept)
+
+    def _fetch_page_sync(self, path: str, params: dict[str, Any], accept: str) -> PageData:
+        with requests.Session() as session:
+            client = ComprasClient(
+                self.base_url,
+                token=self.token,
+                timeout=self.timeout,
+                session=session,
+                max_retries=self.max_retries,
+                retry_backoff_seconds=self.retry_backoff_seconds,
+            )
+            return client.fetch_page(path, params, accept=accept)
 
 
 def _retry_after_seconds(value: str | None) -> float | None:

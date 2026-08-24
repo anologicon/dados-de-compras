@@ -56,6 +56,33 @@ def test_cli_sync_invokes_runner(monkeypatch, tmp_path: Path):
     assert captured["config"].purchase_sources == ()
 
 
+def test_cli_async_flags_are_passed_to_config(monkeypatch, tmp_path: Path):
+    dummy = DummyRunner()
+    captured = {}
+
+    def fake_build_runner(config, reporter=None):
+        captured["config"] = config
+        return dummy
+
+    monkeypatch.setattr(cli, "build_runner", fake_build_runner)
+
+    exit_code = cli.main([
+        "sync",
+        "--db-path",
+        str(tmp_path / "compras.duckdb"),
+        "--operation",
+        "consultarUasg",
+        "--async",
+        "--concurrency",
+        "3",
+    ])
+
+    assert exit_code == 0
+    assert dummy.ran is True
+    assert captured["config"].async_mode is True
+    assert captured["config"].concurrency == 3
+
+
 def test_cli_loads_token_from_dotenv(monkeypatch, tmp_path: Path):
     dummy = DummyRunner()
     captured = {}

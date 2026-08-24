@@ -29,6 +29,8 @@ def build_parser() -> argparse.ArgumentParser:
     sync_parser.add_argument("--start-date", default=None, help="Historical start date (YYYY-MM-DD)")
     sync_parser.add_argument("--end-date", default=None, help="Historical end date (YYYY-MM-DD)")
     sync_parser.add_argument("--page-size", type=int, default=None, help="Optional server page size")
+    sync_parser.add_argument("--async", dest="async_mode", action="store_true", help="Fetch pages concurrently while keeping DuckDB writes serial")
+    sync_parser.add_argument("--concurrency", type=int, default=5, help="Maximum concurrent page fetches when --async is enabled")
     sync_parser.add_argument("--scope", default="historical", help="Sync scope label")
     sync_parser.add_argument("--state-uf", default=None, help="UF abbreviation to restrict supported jobs (for example, SP)")
     sync_parser.add_argument("--municipality-code", type=int, default=None, help="IBGE municipality code for city-specific purchase runs")
@@ -112,6 +114,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 municipality_code=args.municipality_code,
                 pncp_modalidade_codes=tuple(args.pncp_modalidade_code),
                 purchase_sources=purchase_sources,
+                async_mode=args.async_mode,
+                concurrency=args.concurrency,
             )
         except ValueError as exc:
             parser.error(str(exc))

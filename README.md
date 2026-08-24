@@ -48,11 +48,18 @@ Municipality-specific purchases:
 compras-crawler sync --municipality-code 4202909 --state-uf SC --source pncp --pncp-modalidade-code 8
 ```
 
+Concurrent page fetching with serial DuckDB writes:
+```bash
+compras-crawler sync --operation consultarUasg --async --concurrency 5
+```
+
 Useful flags:
 - `--base-url` (HTTPS only)
 - `--start-date`
 - `--end-date`
 - `--page-size`
+- `--async` to fetch pages concurrently while preserving serial writes
+- `--concurrency 5` to control the async page-fetch fanout
 - `--operation consultarUasg|consultarLicitacao|consultarContratacoes_PNCP_14133|...` (repeatable)
 - `--state-uf SP` to restrict supported jobs by UF
 - `--municipality-code 3550308` + `--source pncp` + repeatable `--pncp-modalidade-code` values for city-specific purchase runs

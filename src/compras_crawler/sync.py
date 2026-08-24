@@ -4,8 +4,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from time import monotonic
 from typing import Any
+import asyncio
+import inspect
 
-from .client import ComprasClient, validate_base_url
+from .client import AsyncComprasClient, ComprasClient, validate_base_url
 from .log import get_logger
 from .manifest import EndpointJob, build_historical_manifest, build_municipality_purchase_manifest, default_date_window
 from .ui import RunContext
@@ -30,9 +32,14 @@ class SyncConfig:
     pncp_modalidade_code: int | None = None
     pncp_modalidade_codes: tuple[int, ...] = ()
     purchase_sources: tuple[str, ...] = ()
+    async_mode: bool = False
+    concurrency: int = 5
 
     def __post_init__(self) -> None:
         validate_base_url(self.base_url, token=self.token)
+        if self.concurrency < 1:
+            raise ValueError("concurrency must be greater than or equal to 1")
+
         if self.state_uf is not None:
             object.__setattr__(self, "state_uf", self.state_uf.strip().upper())
             if len(self.state_uf) != 2:
@@ -164,6 +171,23 @@ class SyncRunner:
     def _run_job(self, run_id: str, job: EndpointJob, *, index: int, total: int) -> None:
         start_page = self.ops_store.load_checkpoint(job.name) if self.config.resume else None
         page = start_page or 1
+        self._notify_job_started(run_id, job, index=index, total=total, start_page=page)
+
+        if hasattr(self.client, "fetch_page"):
+            while True:
+                page_data = self._fetch_page_with_reporting(job, page)
+                self._persist_page(run_id, job, page_data)
+                page = page_data.page_number + 1
+                if not self._should_continue(page_data, job.accept):
+                    break
+        else:
+            for page_data in self.client.iter_pages(job.path, self._page_params(job, page), accept=job.accept, job_name=job.name):
+                self._persist_page(run_id, job, page_data)
+                page = page_data.page_number + 1
+        self._notify("job_finished", job_name=job.name, next_page=page)
+        self.logger.info("job finished run_id=%s job=%s next_page=%s", run_id, job.name, page)
+
+    def _notify_job_started(self, run_id: str, job: EndpointJob, *, index: int, total: int, start_page: int) -> None:
         self._notify(
             "job_started",
             index=index,
@@ -171,7 +195,7 @@ class SyncRunner:
             job_name=job.name,
             entity_name=job.entity_name,
             path=job.path,
-            start_page=page,
+            start_page=start_page,
             resume=self.config.resume,
         )
         self.logger.info(
@@ -180,114 +204,73 @@ class SyncRunner:
             job.name,
             job.entity_name,
             job.path,
-            page,
+            start_page,
             self.config.resume,
         )
 
-        if hasattr(self.client, "fetch_page"):
-            while True:
-                request_params = self._page_params(job, page)
-                self._notify("fetch_started", job_name=job.name, page_number=page, path=job.path)
-                fetch_started = monotonic()
-                try:
-                    page_data = self.client.fetch_page(job.path, request_params, accept=job.accept)
-                except Exception as exc:
-                    setattr(exc, "job_name", job.name)
-                    setattr(exc, "page_number", page)
-                    raise
-                fetch_elapsed = monotonic() - fetch_started
-                record_count = len(page_data.records)
-                self._notify(
-                    "fetch_finished",
-                    job_name=job.name,
-                    page_number=page_data.page_number,
-                    status_code=page_data.status_code,
-                    elapsed_seconds=fetch_elapsed,
-                    record_count=record_count,
-                    content_type=page_data.content_type or job.accept,
-                )
-                self.warehouse.land_page(
-                    run_id=run_id,
-                    job_name=job.name,
-                    entity_name=job.entity_name,
-                    page_number=page_data.page_number,
-                    request_params_json=stable_json(page_data.params),
-                    response_format=page_data.content_type or job.accept,
-                    http_status=page_data.status_code,
-                    payload_json=stable_json(page_data.raw),
-                    payload_text=page_data.raw if isinstance(page_data.raw, str) else None,
-                    payload_hash=stable_hash(page_data.raw),
-                )
-                normalized = normalize_records(
-                    entity_name=job.entity_name,
-                    records=extract_records(page_data.raw) if not page_data.records else page_data.records,
-                    key_fields=job.key_fields,
-                    run_id=run_id,
-                    source_job=job.name,
-                    source_page=page_data.page_number,
-                )
-                self.warehouse.upsert_records(normalized)
-                self.ops_store.save_checkpoint(job.name, next_page=page_data.page_number + 1, payload_hash=stable_hash(page_data.raw))
-                self._notify(
-                    "page_done",
-                    job_name=job.name,
-                    page_number=page_data.page_number,
-                    status_code=page_data.status_code,
-                    record_count=len(normalized),
-                )
-                self.logger.info(
-                    "job page done run_id=%s job=%s page=%s status=%s records=%s",
-                    run_id,
-                    job.name,
-                    page_data.page_number,
-                    page_data.status_code,
-                    len(normalized),
-                )
-                page = page_data.page_number + 1
-                if not self._should_continue(page_data, job.accept):
-                    break
-        else:
-            for page_data in self.client.iter_pages(job.path, self._page_params(job, page), accept=job.accept, job_name=job.name):
-                self.warehouse.land_page(
-                    run_id=run_id,
-                    job_name=job.name,
-                    entity_name=job.entity_name,
-                    page_number=page_data.page_number,
-                    request_params_json=stable_json(page_data.params),
-                    response_format=page_data.content_type or job.accept,
-                    http_status=page_data.status_code,
-                    payload_json=stable_json(page_data.raw),
-                    payload_text=page_data.raw if isinstance(page_data.raw, str) else None,
-                    payload_hash=stable_hash(page_data.raw),
-                )
-                normalized = normalize_records(
-                    entity_name=job.entity_name,
-                    records=extract_records(page_data.raw) if not page_data.records else page_data.records,
-                    key_fields=job.key_fields,
-                    run_id=run_id,
-                    source_job=job.name,
-                    source_page=page_data.page_number,
-                )
-                self.warehouse.upsert_records(normalized)
-                self.ops_store.save_checkpoint(job.name, next_page=page_data.page_number + 1, payload_hash=stable_hash(page_data.raw))
-                self._notify(
-                    "page_done",
-                    job_name=job.name,
-                    page_number=page_data.page_number,
-                    status_code=page_data.status_code,
-                    record_count=len(normalized),
-                )
-                self.logger.info(
-                    "job page done run_id=%s job=%s page=%s status=%s records=%s",
-                    run_id,
-                    job.name,
-                    page_data.page_number,
-                    page_data.status_code,
-                    len(normalized),
-                )
-                page = page_data.page_number + 1
-        self._notify("job_finished", job_name=job.name, next_page=page)
-        self.logger.info("job finished run_id=%s job=%s next_page=%s", run_id, job.name, page)
+    def _fetch_page_with_reporting(self, job: EndpointJob, page: int):
+        request_params = self._page_params(job, page)
+        self._notify("fetch_started", job_name=job.name, page_number=page, path=job.path)
+        fetch_started = monotonic()
+        try:
+            page_data = self.client.fetch_page(job.path, request_params, accept=job.accept)
+        except Exception as exc:
+            setattr(exc, "job_name", job.name)
+            setattr(exc, "page_number", page)
+            raise
+        self._notify_fetch_finished(job, page_data, elapsed_seconds=monotonic() - fetch_started)
+        return page_data
+
+    def _notify_fetch_finished(self, job: EndpointJob, page_data, *, elapsed_seconds: float) -> None:
+        self._notify(
+            "fetch_finished",
+            job_name=job.name,
+            page_number=page_data.page_number,
+            status_code=page_data.status_code,
+            elapsed_seconds=elapsed_seconds,
+            record_count=len(page_data.records),
+            content_type=page_data.content_type or job.accept,
+        )
+
+    def _persist_page(self, run_id: str, job: EndpointJob, page_data) -> int:
+        self.warehouse.land_page(
+            run_id=run_id,
+            job_name=job.name,
+            entity_name=job.entity_name,
+            page_number=page_data.page_number,
+            request_params_json=stable_json(page_data.params),
+            response_format=page_data.content_type or job.accept,
+            http_status=page_data.status_code,
+            payload_json=stable_json(page_data.raw),
+            payload_text=page_data.raw if isinstance(page_data.raw, str) else None,
+            payload_hash=stable_hash(page_data.raw),
+        )
+        normalized = normalize_records(
+            entity_name=job.entity_name,
+            records=extract_records(page_data.raw) if not page_data.records else page_data.records,
+            key_fields=job.key_fields,
+            run_id=run_id,
+            source_job=job.name,
+            source_page=page_data.page_number,
+        )
+        self.warehouse.upsert_records(normalized)
+        self.ops_store.save_checkpoint(job.name, next_page=page_data.page_number + 1, payload_hash=stable_hash(page_data.raw))
+        self._notify(
+            "page_done",
+            job_name=job.name,
+            page_number=page_data.page_number,
+            status_code=page_data.status_code,
+            record_count=len(normalized),
+        )
+        self.logger.info(
+            "job page done run_id=%s job=%s page=%s status=%s records=%s",
+            run_id,
+            job.name,
+            page_data.page_number,
+            page_data.status_code,
+            len(normalized),
+        )
+        return len(normalized)
 
     def _notify(self, event: str, /, **kwargs: Any) -> None:
         if not self.reporter:
@@ -310,6 +293,155 @@ class SyncRunner:
         params = dict(job.base_params)
         params["pagina"] = page
         return params
+
+
+class AsyncSyncRunner(SyncRunner):
+    """Concurrent page fetch runner with serial DuckDB writes."""
+
+    def __init__(
+        self,
+        *,
+        config: SyncConfig,
+        client: AsyncComprasClient | ComprasClient | Any | None = None,
+        jobs: tuple[EndpointJob, ...] | None = None,
+        reporter: Any | None = None,
+    ):
+        super().__init__(
+            config=config,
+            client=client or AsyncComprasClient(config.base_url, token=config.token),
+            jobs=jobs,
+            reporter=reporter,
+        )
+
+    def run(self) -> str:
+        return asyncio.run(self.run_async())
+
+    async def run_async(self) -> str:
+        self.warehouse.init_schema()
+        self.ops_store.init_schema()
+        run_id = self.ops_store.start_run(base_url=self.config.base_url, scope=self.config.scope, data_db_path=self.config.db_path)
+        self._notify(
+            "start",
+            ctx=RunContext(
+                run_id=run_id,
+                db_path=self.config.db_path,
+                ops_db_path=self.config.ops_db_path,
+                base_url=self.config.base_url,
+                scope=self.config.scope,
+                start_date=self.config.start_date,
+                end_date=self.config.end_date,
+                page_size=self.config.page_size,
+                resume=self.config.resume,
+                total_jobs=len(self.jobs),
+            ),
+        )
+        self.logger.info(
+            "async run started run_id=%s base_url=%s scope=%s jobs=%d concurrency=%d",
+            run_id,
+            self.config.base_url,
+            self.config.scope,
+            len(self.jobs),
+            self.config.concurrency,
+        )
+        try:
+            for index, job in enumerate(self.jobs, start=1):
+                await self._run_job_async(run_id, job, index=index, total=len(self.jobs))
+            self.ops_store.finish_run(run_id, status="finished")
+            self.logger.info("async run finished run_id=%s status=finished", run_id)
+            self._notify("run_finished", run_id=run_id, status="finished")
+            return run_id
+        except Exception as exc:
+            self.logger.exception(
+                "async run failed run_id=%s job=%s page=%s",
+                run_id,
+                getattr(exc, "job_name", "sync"),
+                getattr(exc, "page_number", None),
+            )
+            self.ops_store.record_error(
+                run_id=run_id,
+                job_name=getattr(exc, "job_name", "sync"),
+                page_number=getattr(exc, "page_number", None),
+                message=str(exc),
+                payload_json=None,
+            )
+            self.ops_store.finish_run(run_id, status="failed")
+            self._notify(
+                "run_failed",
+                run_id=run_id,
+                job_name=getattr(exc, "job_name", "sync"),
+                page_number=getattr(exc, "page_number", None),
+                message=str(exc),
+            )
+            raise
+
+    async def _run_job_async(self, run_id: str, job: EndpointJob, *, index: int, total: int) -> None:
+        start_page = self.ops_store.load_checkpoint(job.name) if self.config.resume else None
+        page = start_page or 1
+        self._notify_job_started(run_id, job, index=index, total=total, start_page=page)
+
+        first_page = await self._fetch_page_with_reporting_async(job, page)
+        self._persist_page(run_id, job, first_page)
+        page = first_page.page_number + 1
+
+        if self._should_continue(first_page, job.accept):
+            last_page = self._known_last_page(first_page, job.accept)
+            if last_page is None:
+                page = await self._run_remaining_pages_sequential_async(run_id, job, page)
+            else:
+                page = await self._run_remaining_pages_concurrent_async(run_id, job, page, last_page)
+
+        self._notify("job_finished", job_name=job.name, next_page=page)
+        self.logger.info("async job finished run_id=%s job=%s next_page=%s", run_id, job.name, page)
+
+    async def _run_remaining_pages_sequential_async(self, run_id: str, job: EndpointJob, page: int) -> int:
+        while True:
+            page_data = await self._fetch_page_with_reporting_async(job, page)
+            self._persist_page(run_id, job, page_data)
+            page = page_data.page_number + 1
+            if not self._should_continue(page_data, job.accept):
+                return page
+
+    async def _run_remaining_pages_concurrent_async(self, run_id: str, job: EndpointJob, page: int, last_page: int) -> int:
+        concurrency = max(1, self.config.concurrency)
+        while page <= last_page:
+            batch_end = min(last_page, page + concurrency - 1)
+            page_batch = range(page, batch_end + 1)
+            pages = await asyncio.gather(*(self._fetch_page_with_reporting_async(job, page_number) for page_number in page_batch))
+            for page_data in sorted(pages, key=lambda item: item.page_number):
+                self._persist_page(run_id, job, page_data)
+                page = page_data.page_number + 1
+        return page
+
+    async def _fetch_page_with_reporting_async(self, job: EndpointJob, page: int):
+        request_params = self._page_params(job, page)
+        self._notify("fetch_started", job_name=job.name, page_number=page, path=job.path)
+        fetch_started = monotonic()
+        try:
+            page_data = await self._call_fetch_page_async(job.path, request_params, accept=job.accept)
+        except Exception as exc:
+            setattr(exc, "job_name", job.name)
+            setattr(exc, "page_number", page)
+            raise
+        self._notify_fetch_finished(job, page_data, elapsed_seconds=monotonic() - fetch_started)
+        return page_data
+
+    async def _call_fetch_page_async(self, path: str, params: dict[str, Any], *, accept: str):
+        fetch_page = getattr(self.client, "fetch_page", None)
+        if fetch_page is None:
+            raise TypeError("async sync requires a client with fetch_page")
+        if inspect.iscoroutinefunction(fetch_page):
+            return await fetch_page(path, params, accept=accept)
+        return await asyncio.to_thread(fetch_page, path, params, accept=accept)
+
+    def _known_last_page(self, page_data, accept: str) -> int | None:
+        if accept == "csv" or not isinstance(page_data.raw, dict):
+            return None
+        if "totalPaginas" in page_data.raw:
+            total = int(page_data.raw.get("totalPaginas") or 0)
+            return total if total >= page_data.page_number else page_data.page_number
+        if "paginasRestantes" in page_data.raw:
+            return page_data.page_number + int(page_data.raw.get("paginasRestantes") or 0)
+        return None
 
 
 def build_jobs_for_config(config: SyncConfig) -> tuple[EndpointJob, ...]:
@@ -336,4 +468,6 @@ def build_jobs_for_config(config: SyncConfig) -> tuple[EndpointJob, ...]:
 
 
 def build_runner(config: SyncConfig, reporter: Any | None = None) -> SyncRunner:
+    if config.async_mode:
+        return AsyncSyncRunner(config=config, reporter=reporter)
     return SyncRunner(config=config, reporter=reporter)
