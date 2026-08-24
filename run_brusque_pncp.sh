@@ -11,5 +11,5 @@ compras-crawler sync \
   --pncp-modalidade-code 5 \
   --pncp-modalidade-code 8 \
   --pncp-modalidade-code 10 \
-  --db-path compras.duckdb \
+  --db-path dados_abertos_compras \
   --no-ui

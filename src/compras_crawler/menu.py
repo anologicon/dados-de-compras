@@ -13,7 +13,7 @@ from .manifest import build_historical_manifest, build_operation_catalog, defaul
 InputFunc = Callable[[], str]
 
 DEFAULT_BASE_URL = "https://dadosabertos.compras.gov.br"
-DEFAULT_DB_PATH = "compras.duckdb"
+DEFAULT_DB_PATH = "dados_abertos_compras"
 
 
 @dataclass(frozen=True)
@@ -109,21 +109,21 @@ class InteractiveSyncMenu:
                 step="3/7",
                 purpose="Defina onde os dados serão gravados e qual API será consultada.",
                 hints=(
-                    "O DuckDB guarda páginas brutas e registros normalizados.",
+                    "O prefixo gera apenas o DuckDB Bronze com páginas brutas.",
                     "O SQLite operacional guarda runs, erros e checkpoints de retomada.",
                 ),
             )
         )
         db_path = self._text(
-            "DuckDB de destino",
+            "Prefixo/base do DuckDB Bronze de destino",
             default=DEFAULT_DB_PATH,
-            help_text="Arquivo .duckdb que receberá as tabelas bronze_pages e silver_records. Ex.: compras.duckdb",
+            help_text="Base usada para gerar <base>_bronze.duckdb. Silver e Gold ficam fora do compras-crawler.",
         )
         argv.extend(["--db-path", db_path])
         ops_db_path = self._text(
             "SQLite de operações/checkpoints (vazio = automático)",
             default="",
-            help_text="Deixe vazio para criar automaticamente <nome_do_duckdb>_ops.sqlite ao lado do DuckDB.",
+            help_text="Deixe vazio para criar automaticamente <base>_ops.sqlite ao lado do Bronze.",
         )
         if ops_db_path:
             argv.extend(["--ops-db-path", ops_db_path])

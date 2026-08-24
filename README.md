@@ -1,19 +1,20 @@
 # Project Context
 
 ## What this repo is
-`compras-crawler` is a Python project for crawling and syncing public procurement data from **Compras.gov.br** into **DuckDB**.
+`compras-crawler` is a Python project for crawling public procurement data from **Compras.gov.br** into a **Bronze** DuckDB file.
 
 ## Main goals
 - Fetch public API data from `https://dadosabertos.compras.gov.br`
 - Support JSON and CSV API responses
-- Persist raw pages and normalized records in DuckDB
+- Persist raw fetched pages in a Bronze DuckDB
+- Leave Silver and Gold processing to downstream projects/jobs
 - Resume syncs with checkpoints
 
 ## Current architecture
 - `src/compras_crawler/client.py` — HTTP client, pagination, JSON/CSV parsing
 - `src/compras_crawler/manifest.py` — job manifest for historical syncs
-- `src/compras_crawler/normalize.py` — record normalization and stable hashing
-- `src/compras_crawler/storage.py` — DuckDB schema and persistence
+- `src/compras_crawler/normalize.py` — response record extraction and stable hashing helpers
+- `src/compras_crawler/storage.py` — Bronze DuckDB schema, persistence, and legacy Bronze migration
 - `src/compras_crawler/sync.py` — orchestration runner
 - `src/compras_crawler/cli.py` — CLI entrypoint (`compras-crawler sync`)
 - `docs/API_COMPRAS_GOV.md` — API reference and conventions
@@ -25,12 +26,14 @@
 - CSV endpoints may be selected via `Accept: text/csv`
 - Auth uses bearer token when needed (`COMPRAS_GOV_TOKEN`, optionally loaded from `.env`)
 - `--base-url` must use HTTPS; tokened runs are restricted to `https://dadosabertos.compras.gov.br`
-- Records are deduped using entity-specific key fields; fallback is a stable hash
+- The crawler stores raw Bronze pages only; Silver/Gold deduping and marts are out of scope here
 
 ## CLI usage
 ```bash
-compras-crawler sync --db-path compras.duckdb --ops-db-path compras_ops.sqlite
+compras-crawler sync --db-path dados_abertos_compras
 ```
+`--db-path` is a base/prefix. The example above creates `dados_abertos_compras_bronze.duckdb` and `dados_abertos_compras_ops.sqlite`. Passing `--db-path compras.duckdb` derives `compras_bronze.duckdb` for compatibility.
+
 Default output is an enriched terminal UI: full-screen TUI when running on a TTY, and friendly console progress when output is captured or redirected.
 
 Guided interactive menu/TUI:
@@ -54,6 +57,9 @@ compras-crawler sync --operation consultarUasg --async --concurrency 5
 ```
 
 Useful flags:
+- `--db-path` base/prefix for the Bronze DB (default: `dados_abertos_compras`)
+- `--bronze-db-path` for an explicit Bronze file
+- `--ops-db-path` for operation metadata/checkpoints SQLite
 - `--base-url` (HTTPS only)
 - `--start-date`
 - `--end-date`
@@ -71,12 +77,19 @@ Useful flags:
 - `--no-ui` to disable progress UI output
 
 ## Data model
-DuckDB tables:
+Bronze DuckDB:
 - `bronze_pages` — raw fetched pages
-- `silver_records` — normalized upserts
-- `ops_runs` — sync runs
+
+Ops SQLite:
+- `ops_runs` — sync runs and Bronze DB path
 - `ops_checkpoints` — resume state
 - `ops_errors` — failures
+
+Legacy migration:
+```bash
+compras-crawler migrate-bronze --source-db-path compras.duckdb --db-path dados_abertos_compras
+```
+Use `--overwrite` if the target Bronze file already exists and should be replaced.
 
 ## When editing
 - Prefer small, targeted changes
@@ -86,6 +99,6 @@ DuckDB tables:
 
 ## Good starting points for new work
 - Add or adjust endpoint jobs in `manifest.py`
-- Improve normalization rules in `normalize.py`
-- Extend storage schema in `storage.py`
+- Improve response extraction/hash helpers in `normalize.py`
+- Extend Bronze storage schema in `storage.py`
 - Add CLI flags in `cli.py`

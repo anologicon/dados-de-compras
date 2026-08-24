@@ -43,10 +43,11 @@ def test_build_jobs_for_config_uses_municipality_purchase_manifest(tmp_path: Pat
     assert [job.name for job in jobs] == ["pncp_14133_8"]
     assert jobs[0].base_params["unidadeOrgaoCodigoIbge"] == 4202909
     assert config.purchase_sources == ("pncp",)
+    assert config.bronze_db_path == tmp_path / "compras_bronze.duckdb"
 
 
-def test_sync_runner_lands_and_publishes_rows(tmp_path: Path):
-    data_db_path = tmp_path / "compras.duckdb"
+def test_sync_runner_lands_bronze_pages_only(tmp_path: Path):
+    base_db_path = tmp_path / "compras.duckdb"
     ops_db_path = tmp_path / "compras_ops.sqlite"
     job = EndpointJob(
         name="uasg_status_true",
@@ -72,7 +73,7 @@ def test_sync_runner_lands_and_publishes_rows(tmp_path: Path):
         }
     )
     runner = SyncRunner(
-        config=SyncConfig(db_path=data_db_path, ops_db_path=ops_db_path, base_url="https://dadosabertos.compras.gov.br", resume=True),
+        config=SyncConfig(db_path=base_db_path, ops_db_path=ops_db_path, base_url="https://dadosabertos.compras.gov.br", resume=True),
         client=client,
         jobs=(job,),
     )
@@ -82,9 +83,11 @@ def test_sync_runner_lands_and_publishes_rows(tmp_path: Path):
     assert run_id
     with runner.warehouse.connect() as con:
         assert con.execute("select count(*) from bronze_pages").fetchone()[0] == 1
-        assert con.execute("select count(*) from silver_records").fetchone()[0] == 1
+        tables = {row[0] for row in con.execute("select table_name from duckdb_tables()").fetchall()}
+        assert tables == {"bronze_pages"}
     with runner.ops_store.connect() as con:
-        assert con.execute("select status from ops_runs where run_id = ?", [run_id]).fetchone()[0] == "finished"
+        row = con.execute("select status, bronze_db_path from ops_runs where run_id = ?", [run_id]).fetchone()
+        assert row == ("finished", str(tmp_path / "compras_bronze.duckdb"))
 
 
 def test_build_runner_uses_async_runner_when_enabled(tmp_path: Path):
@@ -101,8 +104,8 @@ def test_build_runner_uses_async_runner_when_enabled(tmp_path: Path):
     assert isinstance(runner, AsyncSyncRunner)
 
 
-def test_async_sync_runner_fetches_known_pages_and_serializes_rows(tmp_path: Path):
-    data_db_path = tmp_path / "compras.duckdb"
+def test_async_sync_runner_fetches_known_pages_and_serializes_bronze_pages(tmp_path: Path):
+    base_db_path = tmp_path / "compras.duckdb"
     ops_db_path = tmp_path / "compras_ops.sqlite"
     job = EndpointJob(
         name="uasg_status_true",
@@ -144,7 +147,7 @@ def test_async_sync_runner_fetches_known_pages_and_serializes_rows(tmp_path: Pat
     client = FakeAsyncClient(pages)
     runner = AsyncSyncRunner(
         config=SyncConfig(
-            db_path=data_db_path,
+            db_path=base_db_path,
             ops_db_path=ops_db_path,
             base_url="https://dadosabertos.compras.gov.br",
             resume=True,
@@ -161,7 +164,8 @@ def test_async_sync_runner_fetches_known_pages_and_serializes_rows(tmp_path: Pat
     assert client.calls == [1, 2, 3]
     with runner.warehouse.connect() as con:
         assert con.execute("select count(*) from bronze_pages").fetchone()[0] == 3
-        assert con.execute("select count(*) from silver_records").fetchone()[0] == 3
+        tables = {row[0] for row in con.execute("select table_name from duckdb_tables()").fetchall()}
+        assert tables == {"bronze_pages"}
     with runner.ops_store.connect() as con:
         assert con.execute("select status from ops_runs where run_id = ?", [run_id]).fetchone()[0] == "finished"
         assert con.execute("select next_page from ops_checkpoints where job_name = ?", [job.name]).fetchone()[0] == 4

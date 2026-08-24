@@ -13,7 +13,7 @@ import threading
 @dataclass(frozen=True)
 class RunContext:
     run_id: str
-    db_path: Path
+    bronze_db_path: Path
     ops_db_path: Path
     base_url: str
     scope: str
@@ -53,8 +53,8 @@ class ConsoleUI:
         self._total_jobs = max(ctx.total_jobs, 1)
         self._write_line(self._style("compras-crawler sync", "cyan", bold=True))
         self._write_line(f"run id:   {ctx.run_id}")
-        self._write_line(f"data db:  {ctx.db_path}")
-        self._write_line(f"ops db:   {ctx.ops_db_path}")
+        self._write_line(f"bronze db: {ctx.bronze_db_path}")
+        self._write_line(f"ops db:    {ctx.ops_db_path}")
         self._write_line(f"base url: {ctx.base_url}")
         self._write_line(f"scope:    {ctx.scope}")
         if ctx.start_date or ctx.end_date:
@@ -516,7 +516,7 @@ class TerminalTUI:
                     date_window = f"{ctx.start_date or '-'} → {ctx.end_date or '-'}"
                 body.extend(
                     [
-                        f"  data db:   {ctx.db_path}",
+                        f"  bronze db: {ctx.bronze_db_path}",
                         f"  ops db:    {ctx.ops_db_path}",
                         f"  base url:  {ctx.base_url}",
                         f"  date:      {date_window}",

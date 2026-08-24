@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import duckdb
 import pytest
 
 import compras_crawler.cli as cli
@@ -49,6 +50,7 @@ def test_cli_sync_invokes_runner(monkeypatch, tmp_path: Path):
     assert captured["reporter"] is not None
     assert captured["config"].token == "abc"
     assert captured["config"].ops_db_path == tmp_path / "compras_ops.sqlite"
+    assert captured["config"].bronze_db_path == tmp_path / "compras_bronze.duckdb"
     assert captured["config"].endpoints == ("consultarContratacoes_PNCP_14133",)
     assert captured["config"].state_uf == "SP"
     assert captured["config"].municipality_code == 3550308
@@ -83,6 +85,31 @@ def test_cli_async_flags_are_passed_to_config(monkeypatch, tmp_path: Path):
     assert captured["config"].concurrency == 3
 
 
+def test_cli_accepts_explicit_bronze_db_path(monkeypatch, tmp_path: Path):
+    dummy = DummyRunner()
+    captured = {}
+
+    def fake_build_runner(config, reporter=None):
+        captured["config"] = config
+        return dummy
+
+    monkeypatch.setattr(cli, "build_runner", fake_build_runner)
+
+    exit_code = cli.main([
+        "sync",
+        "--db-path",
+        str(tmp_path / "base"),
+        "--bronze-db-path",
+        str(tmp_path / "raw.duckdb"),
+        "--operation",
+        "consultarUasg",
+    ])
+
+    assert exit_code == 0
+    assert captured["config"].bronze_db_path == tmp_path / "raw.duckdb"
+    assert captured["config"].ops_db_path == tmp_path / "base_ops.sqlite"
+
+
 def test_cli_loads_token_from_dotenv(monkeypatch, tmp_path: Path):
     dummy = DummyRunner()
     captured = {}
@@ -100,6 +127,7 @@ def test_cli_loads_token_from_dotenv(monkeypatch, tmp_path: Path):
 
     assert exit_code == 0
     assert captured["config"].ops_db_path == tmp_path / "compras_ops.sqlite"
+    assert captured["config"].bronze_db_path == tmp_path / "compras_bronze.duckdb"
     assert captured["config"].token == "from-dotenv"
 
 
@@ -192,6 +220,29 @@ def test_cli_list_operations_includes_pncp_when_selected(capsys):
     output = capsys.readouterr().out
     assert "consultarContratacoes_PNCP_14133" in output
     assert "pncp_14133_8" in output
+
+
+def test_cli_migrate_bronze_copies_legacy_bronze_pages(tmp_path: Path, capsys):
+    source_db_path = tmp_path / "compras.duckdb"
+    with duckdb.connect(str(source_db_path)) as con:
+        con.execute("create table bronze_pages(run_id text, job_name text, entity_name text, page_number integer, request_params_json text, response_format text, http_status integer, payload_json text, payload_text text, payload_hash text, fetched_at timestamp)")
+        con.execute("insert into bronze_pages values ('run-1', 'job-1', 'uasg', 1, '{}', 'json', 200, '{}', null, 'hash', current_timestamp)")
+
+    exit_code = cli.main([
+        "migrate-bronze",
+        "--source-db-path",
+        str(source_db_path),
+        "--db-path",
+        str(tmp_path / "dados_abertos_compras"),
+    ])
+
+    assert exit_code == 0
+    output = capsys.readouterr().out
+    assert "Migração Bronze concluída" in output
+    with duckdb.connect(str(tmp_path / "dados_abertos_compras_bronze.duckdb"), read_only=True) as con:
+        assert con.execute("select count(*) from bronze_pages").fetchone()[0] == 1
+    assert not (tmp_path / "dados_abertos_compras_silver.duckdb").exists()
+    assert not (tmp_path / "dados_abertos_compras_gold.duckdb").exists()
 
 
 def test_cli_rejects_unsafe_tokened_base_url(monkeypatch, tmp_path: Path):

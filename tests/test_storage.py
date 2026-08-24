@@ -2,18 +2,30 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from compras_crawler.storage import DuckWarehouse, SqliteOpsStore
+import duckdb
+
+from compras_crawler.storage import BronzeWarehouse, SqliteOpsStore, migrate_bronze_database
 
 
-def test_storage_separates_data_and_ops(tmp_path: Path):
-    data_db_path = tmp_path / "compras.duckdb"
+def _table_count(db_path: Path, table_name: str) -> int:
+    with duckdb.connect(str(db_path), read_only=True) as con:
+        return int(con.execute(f"select count(*) from {table_name}").fetchone()[0])
+
+
+def test_storage_writes_bronze_and_ops_only(tmp_path: Path):
+    bronze_db_path = tmp_path / "compras_bronze.duckdb"
     ops_db_path = tmp_path / "compras_ops.sqlite"
-    warehouse = DuckWarehouse(data_db_path)
+    warehouse = BronzeWarehouse(bronze_db_path)
     ops = SqliteOpsStore(ops_db_path)
     warehouse.init_schema()
     ops.init_schema()
 
-    run_id = ops.start_run(base_url="https://dadosabertos.compras.gov.br", scope="historical", data_db_path=data_db_path)
+    run_id = ops.start_run(
+        base_url="https://dadosabertos.compras.gov.br",
+        scope="historical",
+        data_db_path=tmp_path / "compras",
+        bronze_db_path=bronze_db_path,
+    )
     warehouse.land_page(
         run_id=run_id,
         job_name="uasg_status_true",
@@ -26,43 +38,40 @@ def test_storage_separates_data_and_ops(tmp_path: Path):
         payload_text=None,
         payload_hash="hash-1",
     )
-    warehouse.upsert_records(
-        [
-            {
-                "entity_name": "uasg",
-                "record_key": "1",
-                "payload_json": '{"codigoUasg": 1, "nomeUasg": "A"}',
-                "payload_hash": "row-hash-1",
-                "run_id": run_id,
-                "source_job": "uasg_status_true",
-                "source_page": 1,
-            }
-        ]
-    )
     ops.save_checkpoint("uasg_status_true", next_page=2, payload_hash="hash-1")
     ops.finish_run(run_id, status="finished")
 
     assert ops.load_checkpoint("uasg_status_true") == 2
-    with warehouse.connect() as con:
-        assert con.execute("select count(*) from bronze_pages").fetchone()[0] == 1
-        assert con.execute("select count(*) from silver_records").fetchone()[0] == 1
+    assert _table_count(bronze_db_path, "bronze_pages") == 1
+    with duckdb.connect(str(bronze_db_path), read_only=True) as con:
+        tables = {row[0] for row in con.execute("select table_name from duckdb_tables()").fetchall()}
+        assert tables == {"bronze_pages"}
     with ops.connect() as con:
-        assert con.execute("select status from ops_runs where run_id = ?", [run_id]).fetchone()[0] == "finished"
+        row = con.execute(
+            "select status, bronze_db_path from ops_runs where run_id = ?",
+            [run_id],
+        ).fetchone()
+        assert row == ("finished", str(bronze_db_path))
         assert con.execute("select count(*) from ops_checkpoints").fetchone()[0] == 1
 
-    warehouse.upsert_records(
-        [
-            {
-                "entity_name": "uasg",
-                "record_key": "1",
-                "payload_json": '{"codigoUasg": 1, "nomeUasg": "B"}',
-                "payload_hash": "row-hash-2",
-                "run_id": run_id,
-                "source_job": "uasg_status_true",
-                "source_page": 2,
-            }
-        ]
+
+def test_migrate_bronze_database_copies_only_legacy_bronze_pages(tmp_path: Path):
+    source_db_path = tmp_path / "compras.duckdb"
+    with duckdb.connect(str(source_db_path)) as con:
+        con.execute(
+            "create table bronze_pages(run_id text, job_name text, entity_name text, page_number integer, request_params_json text, response_format text, http_status integer, payload_json text, payload_text text, payload_hash text, fetched_at timestamp)"
+        )
+        con.execute(
+            "insert into bronze_pages values ('run-1', 'job-1', 'uasg', 1, '{}', 'json', 200, '{}', null, 'hash', current_timestamp)"
+        )
+
+    result = migrate_bronze_database(
+        source_db_path=source_db_path,
+        bronze_db_path=tmp_path / "dados_bronze.duckdb",
     )
 
-    with warehouse.connect() as con:
-        assert con.execute("select payload_json from silver_records where record_key = '1'").fetchone()[0] == '{"codigoUasg": 1, "nomeUasg": "B"}'
+    assert result.bronze_pages == 1
+    assert _table_count(result.bronze_db_path, "bronze_pages") == 1
+    with duckdb.connect(str(result.bronze_db_path), read_only=True) as con:
+        tables = {row[0] for row in con.execute("select table_name from duckdb_tables()").fetchall()}
+        assert tables == {"bronze_pages"}

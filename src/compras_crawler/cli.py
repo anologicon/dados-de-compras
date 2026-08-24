@@ -11,6 +11,7 @@ from dotenv import load_dotenv
 
 from .log import configure_logging
 from .manifest import build_operation_catalog, default_date_window
+from .storage import DEFAULT_DB_PREFIX, derive_bronze_db_path, migrate_bronze_database
 from .sync import SyncConfig, build_jobs_for_config, build_runner
 from .ui import ConsoleUI, TerminalTUI
 
@@ -23,7 +24,13 @@ def build_parser() -> argparse.ArgumentParser:
     menu_parser.add_argument("--dry-run", action="store_true", help="Only print the generated sync command")
 
     sync_parser = subparsers.add_parser("sync", help="Run the Compras.gov.br sync pipeline")
-    sync_parser.add_argument("--db-path", type=Path, default=Path("compras.duckdb"), help="DuckDB file path for synced data")
+    sync_parser.add_argument(
+        "--db-path",
+        type=Path,
+        default=DEFAULT_DB_PREFIX,
+        help="Base path/prefix used to derive the Bronze DB: <base>_bronze.duckdb",
+    )
+    sync_parser.add_argument("--bronze-db-path", type=Path, default=None, help="Explicit DuckDB path for raw bronze pages")
     sync_parser.add_argument("--ops-db-path", type=Path, default=None, help="SQLite file path for operation metadata")
     sync_parser.add_argument("--base-url", default="https://dadosabertos.compras.gov.br", help="API base URL (must use https)")
     sync_parser.add_argument("--start-date", default=None, help="Historical start date (YYYY-MM-DD)")
@@ -51,6 +58,17 @@ def build_parser() -> argparse.ArgumentParser:
     sync_parser.add_argument("--tui", action="store_true", help="Force the full-screen terminal UI")
     sync_parser.add_argument("--no-ui", action="store_true", help="Disable progress UI output")
     sync_parser.add_argument("--resume", action="store_true", help=argparse.SUPPRESS)
+
+    migrate_parser = subparsers.add_parser("migrate-bronze", help="Copy bronze_pages from a legacy single DuckDB into the Bronze DB")
+    migrate_parser.add_argument("--source-db-path", type=Path, default=Path("compras.duckdb"), help="Legacy DuckDB containing bronze_pages")
+    migrate_parser.add_argument(
+        "--db-path",
+        type=Path,
+        default=DEFAULT_DB_PREFIX,
+        help="Base path/prefix used to derive the target Bronze DB when --bronze-db-path is omitted",
+    )
+    migrate_parser.add_argument("--bronze-db-path", type=Path, default=None, help="Target Bronze DuckDB path")
+    migrate_parser.add_argument("--overwrite", action="store_true", help="Overwrite target Bronze DB file if it already exists")
     return parser
 
 
@@ -90,6 +108,19 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
         return main(["sync", *sync_argv])
 
+    if args.command == "migrate-bronze":
+        try:
+            result = migrate_bronze_database(
+                source_db_path=args.source_db_path,
+                bronze_db_path=args.bronze_db_path or derive_bronze_db_path(args.db_path),
+                overwrite=args.overwrite,
+            )
+        except (FileNotFoundError, FileExistsError, ValueError) as exc:
+            parser.error(str(exc))
+        print("Migração Bronze concluída:")
+        print(f"  bronze: {result.bronze_db_path} ({result.bronze_pages} páginas)")
+        return 0
+
     if args.command == "sync":
         configure_logging(args.log_level)
         start_date = args.start_date or default_date_window()[0]
@@ -102,6 +133,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             config = SyncConfig(
                 db_path=args.db_path,
                 ops_db_path=args.ops_db_path,
+                bronze_db_path=args.bronze_db_path,
                 base_url=args.base_url,
                 token=os.getenv("COMPRAS_GOV_TOKEN"),
                 start_date=args.start_date,

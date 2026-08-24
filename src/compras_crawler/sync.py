@@ -11,14 +11,15 @@ from .client import AsyncComprasClient, ComprasClient, validate_base_url
 from .log import get_logger
 from .manifest import EndpointJob, build_historical_manifest, build_municipality_purchase_manifest, default_date_window
 from .ui import RunContext
-from .normalize import extract_records, normalize_records, stable_hash, stable_json
-from .storage import DuckWarehouse, SqliteOpsStore
+from .normalize import stable_hash, stable_json
+from .storage import DEFAULT_DB_PREFIX, DuckWarehouse, SqliteOpsStore, derive_bronze_db_path, derive_ops_db_path
 
 
 @dataclass(frozen=True)
 class SyncConfig:
-    db_path: Path
+    db_path: Path = DEFAULT_DB_PREFIX
     ops_db_path: Path | None = None
+    bronze_db_path: Path | None = None
     base_url: str = "https://dadosabertos.compras.gov.br"
     token: str | None = None
     start_date: str | None = None
@@ -36,6 +37,10 @@ class SyncConfig:
     concurrency: int = 5
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "db_path", Path(self.db_path))
+        object.__setattr__(self, "bronze_db_path", Path(self.bronze_db_path) if self.bronze_db_path is not None else derive_bronze_db_path(self.db_path))
+        object.__setattr__(self, "ops_db_path", Path(self.ops_db_path) if self.ops_db_path is not None else derive_ops_db_path(self.db_path))
+
         validate_base_url(self.base_url, token=self.token)
         if self.concurrency < 1:
             raise ValueError("concurrency must be greater than or equal to 1")
@@ -85,9 +90,6 @@ class SyncConfig:
         elif self.purchase_sources:
             raise ValueError("purchase_sources requires municipality_code")
 
-        if self.ops_db_path is None:
-            object.__setattr__(self, "ops_db_path", self.db_path.with_name(f"{self.db_path.stem}_ops.sqlite"))
-
     def resolved_dates(self) -> tuple[str, str]:
         if self.start_date and self.end_date:
             return self.start_date, self.end_date
@@ -106,7 +108,7 @@ class SyncRunner:
         self.config = config
         self.client = client or ComprasClient(config.base_url, token=config.token)
         self.jobs = jobs or build_jobs_for_config(config)
-        self.warehouse = DuckWarehouse(config.db_path)
+        self.warehouse = DuckWarehouse(config.bronze_db_path)
         self.ops_store = SqliteOpsStore(config.ops_db_path)
         self.logger = get_logger("sync")
         self.reporter = reporter
@@ -114,12 +116,17 @@ class SyncRunner:
     def run(self) -> str:
         self.warehouse.init_schema()
         self.ops_store.init_schema()
-        run_id = self.ops_store.start_run(base_url=self.config.base_url, scope=self.config.scope, data_db_path=self.config.db_path)
+        run_id = self.ops_store.start_run(
+            base_url=self.config.base_url,
+            scope=self.config.scope,
+            data_db_path=self.config.db_path,
+            bronze_db_path=self.config.bronze_db_path,
+        )
         self._notify(
             "start",
             ctx=RunContext(
                 run_id=run_id,
-                db_path=self.config.db_path,
+                bronze_db_path=self.config.bronze_db_path,
                 ops_db_path=self.config.ops_db_path,
                 base_url=self.config.base_url,
                 scope=self.config.scope,
@@ -245,22 +252,14 @@ class SyncRunner:
             payload_text=page_data.raw if isinstance(page_data.raw, str) else None,
             payload_hash=stable_hash(page_data.raw),
         )
-        normalized = normalize_records(
-            entity_name=job.entity_name,
-            records=extract_records(page_data.raw) if not page_data.records else page_data.records,
-            key_fields=job.key_fields,
-            run_id=run_id,
-            source_job=job.name,
-            source_page=page_data.page_number,
-        )
-        self.warehouse.upsert_records(normalized)
+        record_count = len(page_data.records)
         self.ops_store.save_checkpoint(job.name, next_page=page_data.page_number + 1, payload_hash=stable_hash(page_data.raw))
         self._notify(
             "page_done",
             job_name=job.name,
             page_number=page_data.page_number,
             status_code=page_data.status_code,
-            record_count=len(normalized),
+            record_count=record_count,
         )
         self.logger.info(
             "job page done run_id=%s job=%s page=%s status=%s records=%s",
@@ -268,9 +267,9 @@ class SyncRunner:
             job.name,
             page_data.page_number,
             page_data.status_code,
-            len(normalized),
+            record_count,
         )
-        return len(normalized)
+        return record_count
 
     def _notify(self, event: str, /, **kwargs: Any) -> None:
         if not self.reporter:
@@ -319,12 +318,17 @@ class AsyncSyncRunner(SyncRunner):
     async def run_async(self) -> str:
         self.warehouse.init_schema()
         self.ops_store.init_schema()
-        run_id = self.ops_store.start_run(base_url=self.config.base_url, scope=self.config.scope, data_db_path=self.config.db_path)
+        run_id = self.ops_store.start_run(
+            base_url=self.config.base_url,
+            scope=self.config.scope,
+            data_db_path=self.config.db_path,
+            bronze_db_path=self.config.bronze_db_path,
+        )
         self._notify(
             "start",
             ctx=RunContext(
                 run_id=run_id,
-                db_path=self.config.db_path,
+                bronze_db_path=self.config.bronze_db_path,
                 ops_db_path=self.config.ops_db_path,
                 base_url=self.config.base_url,
                 scope=self.config.scope,
