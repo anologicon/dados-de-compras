@@ -33,11 +33,11 @@ compras-crawler sync --db-path compras.duckdb --ops-db-path compras_ops.sqlite
 ```
 Default output is an enriched terminal UI: full-screen TUI when running on a TTY, and friendly console progress when output is captured or redirected.
 
-Interactive menu:
+Guided interactive menu/TUI:
 ```bash
 compras-crawler menu
 ```
-Use `compras-crawler menu --dry-run` to build and print the equivalent `sync` command without executing it.
+The menu is a step-by-step wizard with contextual help (`?`), validated inputs, operation selection by number/id/range, and a final command review. Use `compras-crawler menu --dry-run` to build and print the equivalent `sync` command without executing it.
 
 Swagger-style example:
 ```bash
