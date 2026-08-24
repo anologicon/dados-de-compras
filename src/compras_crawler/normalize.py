@@ -3,7 +3,10 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import hashlib
 import json
-from typing import Any
+from typing import Any, TypeAlias
+
+KeyFieldCandidate: TypeAlias = str | tuple[str, ...]
+KeyFields: TypeAlias = tuple[KeyFieldCandidate, ...]
 
 
 def stable_json(value: Any) -> str:
@@ -27,9 +30,28 @@ def extract_records(payload: Any) -> list[dict[str, Any]]:
     return []
 
 
-def first_present(record: dict[str, Any], keys: tuple[str, ...]) -> Any:
+def _present(value: Any) -> bool:
+    return value not in (None, "")
+
+
+def _composite_key(record: dict[str, Any], keys: tuple[str, ...]) -> str | None:
+    values: dict[str, Any] = {}
     for key in keys:
-        if key in record and record[key] not in (None, ""):
+        value = record.get(key)
+        if not _present(value):
+            return None
+        values[key] = value
+    return stable_json(values)
+
+
+def first_present(record: dict[str, Any], keys: KeyFields) -> Any:
+    for key in keys:
+        if isinstance(key, tuple):
+            value = _composite_key(record, key)
+            if value is not None:
+                return value
+            continue
+        if key in record and _present(record[key]):
             return record[key]
     return None
 
@@ -38,7 +60,7 @@ def normalize_record(
     *,
     entity_name: str,
     record: dict[str, Any],
-    key_fields: tuple[str, ...],
+    key_fields: KeyFields,
     run_id: str,
     source_job: str,
     source_page: int,
@@ -64,7 +86,7 @@ def normalize_records(
     *,
     entity_name: str,
     records: list[dict[str, Any]],
-    key_fields: tuple[str, ...],
+    key_fields: KeyFields,
     run_id: str,
     source_job: str,
     source_page: int,

@@ -189,7 +189,12 @@ class SyncRunner:
                 request_params = self._page_params(job, page)
                 self._notify("fetch_started", job_name=job.name, page_number=page, path=job.path)
                 fetch_started = monotonic()
-                page_data = self.client.fetch_page(job.path, request_params, accept=job.accept)
+                try:
+                    page_data = self.client.fetch_page(job.path, request_params, accept=job.accept)
+                except Exception as exc:
+                    setattr(exc, "job_name", job.name)
+                    setattr(exc, "page_number", page)
+                    raise
                 fetch_elapsed = monotonic() - fetch_started
                 record_count = len(page_data.records)
                 self._notify(
@@ -294,8 +299,11 @@ class SyncRunner:
     def _should_continue(self, page_data, accept: str) -> bool:
         if accept == "csv":
             return bool(page_data.records)
-        if isinstance(page_data.raw, dict) and int(page_data.raw.get("paginasRestantes", 0) or 0) > 0:
-            return True
+        if isinstance(page_data.raw, dict):
+            if "paginasRestantes" in page_data.raw:
+                return int(page_data.raw.get("paginasRestantes") or 0) > 0
+            if "totalPaginas" in page_data.raw:
+                return page_data.page_number < int(page_data.raw.get("totalPaginas") or 0)
         return bool(page_data.records)
 
     def _page_params(self, job: EndpointJob, page: int) -> dict[str, Any]:

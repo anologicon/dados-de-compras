@@ -26,3 +26,18 @@ def test_normalize_record_uses_alias_key_and_stable_payload_hash():
     assert normalized["payload_hash"] == stable_hash(record)
     assert normalized["run_id"] == "run-1"
     assert normalized["source_page"] == 1
+
+
+def test_normalize_record_supports_composite_keys():
+    record = {"codigoPdm": 123, "codigoNaturezaDespesa": "339030", "nomeNaturezaDespesa": "Material"}
+
+    normalized = normalize_record(
+        entity_name="material_expense_nature",
+        record=record,
+        key_fields=(("codigoPdm", "codigoNaturezaDespesa"),),
+        run_id="run-1",
+        source_job="material_expense_nature_true",
+        source_page=1,
+    )
+
+    assert normalized["record_key"] == stable_json({"codigoNaturezaDespesa": "339030", "codigoPdm": 123})

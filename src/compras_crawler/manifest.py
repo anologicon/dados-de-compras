@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, timedelta
-from typing import Any, Callable
+from typing import Any, Callable, TypeAlias
+
+KeyFieldCandidate: TypeAlias = str | tuple[str, ...]
+KeyFields: TypeAlias = tuple[KeyFieldCandidate, ...]
 
 
 @dataclass(frozen=True)
@@ -11,7 +14,7 @@ class EndpointJob:
     operation_id: str
     path: str
     entity_name: str
-    key_fields: tuple[str, ...]
+    key_fields: KeyFields
     base_params: dict[str, Any]
     accept: str = "json"
     supports_page_size: bool = False
@@ -67,7 +70,7 @@ def _boolean_jobs(
     operation_id: str,
     path: str,
     entity_name: str,
-    key_fields: tuple[str, ...],
+    key_fields: KeyFields,
     param_name: str,
     *,
     supports_page_size: bool,
@@ -234,6 +237,36 @@ def build_historical_manifest(
         *_boolean_jobs("material_class", "consultarClasseMaterial", "/modulo-material/2_consultarClasseMaterial", "material_class", ("codigoClasse", "codigo_classe"), "statusClasse", supports_page_size=True),
         *_boolean_jobs("material_pdm", "consultarPdmMaterial", "/modulo-material/3_consultarPdmMaterial", "material_pdm", ("codigoPdm", "codigo_pdm"), "statusPdm", supports_page_size=True),
         *_boolean_jobs("material_item", "consultarItemMaterial", "/modulo-material/4_consultarItemMaterial", "material_item", ("codigoItem", "codigo_item"), "statusItem", supports_page_size=True),
+        *_boolean_jobs(
+            "material_expense_nature",
+            "consultarMaterialNaturezaDespesa",
+            "/modulo-material/5_consultarMaterialNaturezaDespesa",
+            "material_expense_nature",
+            (("codigoPdm", "codigoNaturezaDespesa"),),
+            "statusNaturezaDespesa",
+            supports_page_size=True,
+        ),
+        *_boolean_jobs(
+            "material_supply_unit",
+            "consultarMaterialUnidadeFornecimento",
+            "/modulo-material/6_consultarMaterialUnidadeFornecimento",
+            "material_supply_unit",
+            (
+                ("codigoPdm", "numeroSequencialUnidadeFornecimento"),
+                ("codigoPdm", "siglaUnidadeFornecimento", "capacidadeUnidadeFornecimento"),
+            ),
+            "statusUnidadeFornecimentoPdm",
+            supports_page_size=True,
+        ),
+        EndpointJob(
+            name="material_characteristics",
+            operation_id="consultarMaterialCaracteristicas",
+            path="/modulo-material/7_consultarMaterialCaracteristicas",
+            entity_name="material_characteristics",
+            key_fields=(("codigoItem", "codigoCaracteristica", "codigoValorCaracteristica", "numeroCaracteristica"),),
+            base_params={},
+            supports_page_size=True,
+        ),
     ]
     if state_uf is not None:
         jobs = [

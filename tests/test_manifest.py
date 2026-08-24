@@ -30,6 +30,18 @@ def test_build_operation_catalog_groups_jobs():
     assert catalog[0].job_names == ("uasg_true", "uasg_false")
 
 
+def test_build_historical_manifest_includes_full_material_catalog():
+    jobs = build_historical_manifest("2024-01-01", "2024-01-31", endpoints=("consultarMaterialNaturezaDespesa", "consultarMaterialCaracteristicas"))
+
+    assert [job.operation_id for job in jobs] == [
+        "consultarMaterialNaturezaDespesa",
+        "consultarMaterialNaturezaDespesa",
+        "consultarMaterialCaracteristicas",
+    ]
+    assert jobs[0].key_fields == (("codigoPdm", "codigoNaturezaDespesa"),)
+    assert jobs[2].key_fields == (("codigoItem", "codigoCaracteristica", "codigoValorCaracteristica", "numeroCaracteristica"),)
+
+
 def test_build_historical_manifest_includes_pncp_city_job():
     jobs = build_historical_manifest(
         "2024-01-01",

@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from io import StringIO
+from time import sleep
 import csv
 from typing import Any
 from urllib.parse import urljoin, urlparse
@@ -11,6 +14,7 @@ import requests
 from .normalize import extract_records
 
 DEFAULT_BASE_HOST = "dadosabertos.compras.gov.br"
+DEFAULT_RETRY_STATUS_CODES = {429, 500, 502, 503, 504}
 
 
 @dataclass(frozen=True)
@@ -53,12 +57,16 @@ class ComprasClient:
         token: str | None = None,
         timeout: float = 30.0,
         session: requests.Session | None = None,
+        max_retries: int = 5,
+        retry_backoff_seconds: float = 2.0,
     ):
         validate_base_url(base_url, token=token)
         self.base_url = base_url.rstrip("/")
         self.token = token
         self.timeout = timeout
         self.session = session or requests.Session()
+        self.max_retries = max_retries
+        self.retry_backoff_seconds = retry_backoff_seconds
 
     def _headers(self, accept: str = "json") -> dict[str, str]:
         headers: dict[str, str] = {}
@@ -78,7 +86,7 @@ class ComprasClient:
         accept: str = "json",
     ) -> PageData:
         url = urljoin(self.base_url + "/", path.lstrip("/"))
-        response = self.session.get(url, params=params, headers=self._headers(accept), timeout=self.timeout)
+        response = self._get_with_retries(url, params=params, accept=accept)
         response.raise_for_status()
         content_type = response.headers.get("content-type", "")
         if accept == "csv" or "csv" in content_type:
@@ -123,8 +131,49 @@ class ComprasClient:
                 break
             page += 1
 
+    def _get_with_retries(self, url: str, *, params: dict[str, Any], accept: str) -> requests.Response:
+        last_error: requests.RequestException | None = None
+        for attempt in range(self.max_retries + 1):
+            try:
+                response = self.session.get(url, params=params, headers=self._headers(accept), timeout=self.timeout)
+            except (requests.ConnectionError, requests.Timeout) as exc:
+                last_error = exc
+                if attempt >= self.max_retries:
+                    raise
+                self._sleep_before_retry(attempt=attempt, response=None)
+                continue
+            if response.status_code not in DEFAULT_RETRY_STATUS_CODES or attempt >= self.max_retries:
+                return response
+            self._sleep_before_retry(attempt=attempt, response=response)
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("request retry loop exited unexpectedly")
+
+    def _sleep_before_retry(self, *, attempt: int, response: requests.Response | None) -> None:
+        retry_after = _retry_after_seconds(response.headers.get("Retry-After")) if response is not None else None
+        if retry_after is None:
+            retry_after = min(60.0, self.retry_backoff_seconds * (2**attempt))
+        if retry_after > 0:
+            sleep(retry_after)
+
     def _parse_csv(self, text: str) -> list[dict[str, Any]]:
         if not text.strip():
             return []
         reader = csv.DictReader(StringIO(text))
         return [dict(row) for row in reader]
+
+
+def _retry_after_seconds(value: str | None) -> float | None:
+    if not value:
+        return None
+    try:
+        return max(0.0, float(value))
+    except ValueError:
+        pass
+    try:
+        retry_at = parsedate_to_datetime(value)
+    except (TypeError, ValueError):
+        return None
+    if retry_at.tzinfo is None:
+        retry_at = retry_at.replace(tzinfo=timezone.utc)
+    return max(0.0, (retry_at - datetime.now(tz=timezone.utc)).total_seconds())
