@@ -38,6 +38,10 @@ def build_parser() -> argparse.ArgumentParser:
     sync_parser.add_argument("--page-size", type=int, default=None, help="Optional server page size")
     sync_parser.add_argument("--async", dest="async_mode", action="store_true", help="Fetch pages concurrently while keeping DuckDB writes serial")
     sync_parser.add_argument("--concurrency", type=int, default=5, help="Maximum concurrent page fetches when --async is enabled")
+    sync_parser.add_argument("--delay-seconds", type=float, default=1.0, help="Minimum delay between HTTP requests to avoid rate limits")
+    sync_parser.add_argument("--rate-limit-sleep-seconds", type=float, default=60.0, help="Cooldown after HTTP 429 before retrying")
+    sync_parser.add_argument("--request-timeout", type=float, default=45.0, help="HTTP request timeout in seconds")
+    sync_parser.add_argument("--request-retries", type=int, default=5, help="HTTP retry count for transient errors and 429")
     sync_parser.add_argument("--scope", default="historical", help="Sync scope label")
     sync_parser.add_argument("--state-uf", default=None, help="UF abbreviation to restrict supported jobs (for example, SP)")
     sync_parser.add_argument("--municipality-code", type=int, default=None, help="IBGE municipality code for city-specific purchase runs")
@@ -58,6 +62,31 @@ def build_parser() -> argparse.ArgumentParser:
     sync_parser.add_argument("--tui", action="store_true", help="Force the full-screen terminal UI")
     sync_parser.add_argument("--no-ui", action="store_true", help="Disable progress UI output")
     sync_parser.add_argument("--resume", action="store_true", help=argparse.SUPPRESS)
+
+    full_city_parser = subparsers.add_parser("full-city", help="Run a best-effort full public API crawl for one municipality")
+    full_city_parser.add_argument("--db-path", type=Path, default=Path("dados_abertos_compras_full_city"), help="Base path/prefix used to derive Bronze/Ops DBs")
+    full_city_parser.add_argument("--bronze-db-path", type=Path, default=None, help="Explicit DuckDB path for raw bronze pages")
+    full_city_parser.add_argument("--ops-db-path", type=Path, default=None, help="SQLite file path for operation metadata")
+    full_city_parser.add_argument("--base-url", default="https://dadosabertos.compras.gov.br", help="API base URL (must use https)")
+    full_city_parser.add_argument("--start-date", required=True, help="Start date (YYYY-MM-DD)")
+    full_city_parser.add_argument("--end-date", required=True, help="End date (YYYY-MM-DD)")
+    full_city_parser.add_argument("--state-uf", required=True, help="UF abbreviation, for example SC")
+    full_city_parser.add_argument("--municipality-code", type=int, required=True, help="IBGE municipality code, for example 4205407")
+    full_city_parser.add_argument("--page-size", type=int, default=100, help="Optional server page size")
+    full_city_parser.add_argument("--max-pages-per-job", type=int, default=500, help="Safety cap for each paginated endpoint/job")
+    full_city_parser.add_argument("--max-purchases", type=int, default=0, help="Limit PNCP idCompra fanout; 0 means no limit")
+    full_city_parser.add_argument("--max-units", type=int, default=0, help="Limit UASG/unidade fanout; 0 means no limit")
+    full_city_parser.add_argument("--max-suppliers", type=int, default=500, help="Limit supplier lookup fanout; 0 means no limit")
+    full_city_parser.add_argument("--max-price-items", type=int, default=500, help="Limit price-research item fanout; 0 means no limit")
+    full_city_parser.add_argument("--delay-seconds", type=float, default=1.0, help="Delay between HTTP requests")
+    full_city_parser.add_argument("--rate-limit-sleep-seconds", type=float, default=60.0, help="Sleep after HTTP 429 before retrying")
+    full_city_parser.add_argument("--rate-limit-retries", type=int, default=3, help="Retries for HTTP 429 per page")
+    full_city_parser.add_argument("--request-timeout", type=float, default=45.0, help="HTTP request timeout in seconds")
+    full_city_parser.add_argument("--request-retries", type=int, default=5, help="Low-level request retry count")
+    full_city_parser.add_argument("--no-resume", action="store_true", help="Do not skip jobs already present in the target Bronze DB")
+    full_city_parser.add_argument("--no-reference-catalogs", action="store_true", help="Skip derived material/service catalog endpoint fanout")
+    full_city_parser.add_argument("--no-price-research", action="store_true", help="Skip derived price-research endpoint fanout")
+    full_city_parser.add_argument("--dry-run", action="store_true", help="Validate and print the planned full-city crawl without calling the API")
 
     migrate_parser = subparsers.add_parser("migrate-bronze", help="Copy bronze_pages from a legacy single DuckDB into the Bronze DB")
     migrate_parser.add_argument("--source-db-path", type=Path, default=Path("compras.duckdb"), help="Legacy DuckDB containing bronze_pages")
@@ -108,6 +137,54 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
         return main(["sync", *sync_argv])
 
+    if args.command == "full-city":
+        from .full_city import FullCityConfig, run_full_city_crawl
+
+        try:
+            config = FullCityConfig(
+                db_path=args.db_path,
+                ops_db_path=args.ops_db_path,
+                bronze_db_path=args.bronze_db_path,
+                base_url=args.base_url,
+                token=os.getenv("COMPRAS_GOV_TOKEN"),
+                start_date=args.start_date,
+                end_date=args.end_date,
+                state_uf=args.state_uf,
+                municipality_code=args.municipality_code,
+                page_size=args.page_size,
+                max_pages_per_job=args.max_pages_per_job,
+                max_purchases=args.max_purchases,
+                max_units=args.max_units,
+                max_suppliers=args.max_suppliers,
+                max_price_items=args.max_price_items,
+                delay_seconds=args.delay_seconds,
+                rate_limit_sleep_seconds=args.rate_limit_sleep_seconds,
+                rate_limit_retries=args.rate_limit_retries,
+                request_timeout=args.request_timeout,
+                request_retries=args.request_retries,
+                resume=not args.no_resume,
+                include_reference_catalogs=not args.no_reference_catalogs,
+                include_price_research=not args.no_price_research,
+            )
+        except ValueError as exc:
+            parser.error(str(exc))
+        if args.dry_run:
+            print("Full-city crawl plan:")
+            print(f"  municipality: {config.municipality_code}/{config.state_uf}")
+            print(f"  period: {config.start_date}..{config.end_date}")
+            print(f"  bronze: {config.bronze_db_path}")
+            print(f"  ops: {config.ops_db_path}")
+            print(f"  token configured: {bool(config.token)}; sent only after 401/403")
+            print("  protected/admin endpoints: skipped")
+            return 0
+        result = run_full_city_crawl(config)
+        print("Full-city crawl concluído:")
+        print(f"  run_id: {result.run_id}")
+        print(f"  bronze: {result.bronze_db_path}")
+        print(f"  ops: {result.ops_db_path}")
+        print(f"  errors: {len(result.errors)}")
+        return 0
+
     if args.command == "migrate-bronze":
         try:
             result = migrate_bronze_database(
@@ -148,6 +225,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 purchase_sources=purchase_sources,
                 async_mode=args.async_mode,
                 concurrency=args.concurrency,
+                delay_seconds=args.delay_seconds,
+                rate_limit_sleep_seconds=args.rate_limit_sleep_seconds,
+                request_timeout=args.request_timeout,
+                request_retries=args.request_retries,
             )
         except ValueError as exc:
             parser.error(str(exc))

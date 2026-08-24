@@ -123,7 +123,7 @@ class InteractiveSyncMenu:
         ops_db_path = self._text(
             "SQLite de operações/checkpoints (vazio = automático)",
             default="",
-            help_text="Deixe vazio para criar automaticamente <base>_ops.sqlite ao lado do Bronze.",
+            help_text="Deixe vazio para criar automaticamente ops/<base>_ops.sqlite.",
         )
         if ops_db_path:
             argv.extend(["--ops-db-path", ops_db_path])

@@ -18,6 +18,7 @@ class EndpointJob:
     base_params: dict[str, Any]
     accept: str = "json"
     supports_page_size: bool = False
+    requires_auth: bool = False
 
 
 @dataclass(frozen=True)
@@ -119,6 +120,7 @@ def _with_page_size(job: EndpointJob, page_size: int | None) -> EndpointJob:
         base_params={**job.base_params, "tamanhoPagina": page_size},
         accept=job.accept,
         supports_page_size=job.supports_page_size,
+        requires_auth=job.requires_auth,
     )
 
 
@@ -279,6 +281,7 @@ def build_historical_manifest(
                 base_params={**job.base_params, **({"siglaUf": state_uf} if job.operation_id == "consultarUasg" else {})},
                 accept=job.accept,
                 supports_page_size=job.supports_page_size,
+                requires_auth=job.requires_auth,
             )
             for job in jobs
         ]

@@ -15,6 +15,16 @@ from .normalize import stable_hash, stable_json
 from .storage import DEFAULT_DB_PREFIX, DuckWarehouse, SqliteOpsStore, derive_bronze_db_path, derive_ops_db_path
 
 
+def _supports_keyword(callable_obj: Any, keyword: str) -> bool:
+    try:
+        signature = inspect.signature(callable_obj)
+    except (TypeError, ValueError):
+        return False
+    return keyword in signature.parameters or any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in signature.parameters.values()
+    )
+
+
 @dataclass(frozen=True)
 class SyncConfig:
     db_path: Path = DEFAULT_DB_PREFIX
@@ -35,6 +45,11 @@ class SyncConfig:
     purchase_sources: tuple[str, ...] = ()
     async_mode: bool = False
     concurrency: int = 5
+    delay_seconds: float = 1.0
+    rate_limit_sleep_seconds: float = 60.0
+    request_timeout: float = 45.0
+    request_retries: int = 5
+    retry_backoff_seconds: float = 2.0
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "db_path", Path(self.db_path))
@@ -44,6 +59,16 @@ class SyncConfig:
         validate_base_url(self.base_url, token=self.token)
         if self.concurrency < 1:
             raise ValueError("concurrency must be greater than or equal to 1")
+        if self.delay_seconds < 0:
+            raise ValueError("delay_seconds must be non-negative")
+        if self.rate_limit_sleep_seconds < 0:
+            raise ValueError("rate_limit_sleep_seconds must be non-negative")
+        if self.request_timeout <= 0:
+            raise ValueError("request_timeout must be positive")
+        if self.request_retries < 0:
+            raise ValueError("request_retries must be non-negative")
+        if self.retry_backoff_seconds < 0:
+            raise ValueError("retry_backoff_seconds must be non-negative")
 
         if self.state_uf is not None:
             object.__setattr__(self, "state_uf", self.state_uf.strip().upper())
@@ -106,7 +131,15 @@ class SyncRunner:
         reporter: Any | None = None,
     ):
         self.config = config
-        self.client = client or ComprasClient(config.base_url, token=config.token)
+        self.client = client or ComprasClient(
+            config.base_url,
+            token=config.token,
+            timeout=config.request_timeout,
+            max_retries=config.request_retries,
+            retry_backoff_seconds=config.retry_backoff_seconds,
+            rate_limit_sleep_seconds=config.rate_limit_sleep_seconds,
+            request_interval_seconds=config.delay_seconds,
+        )
         self.jobs = jobs or build_jobs_for_config(config)
         self.warehouse = DuckWarehouse(config.bronze_db_path)
         self.ops_store = SqliteOpsStore(config.ops_db_path)
@@ -188,7 +221,13 @@ class SyncRunner:
                 if not self._should_continue(page_data, job.accept):
                     break
         else:
-            for page_data in self.client.iter_pages(job.path, self._page_params(job, page), accept=job.accept, job_name=job.name):
+            iter_pages = getattr(self.client, "iter_pages")
+            kwargs: dict[str, Any] = {"accept": job.accept, "job_name": job.name}
+            if _supports_keyword(iter_pages, "use_auth"):
+                kwargs["use_auth"] = job.requires_auth
+            elif job.requires_auth:
+                raise TypeError("authenticated jobs require a client iter_pages method that accepts use_auth")
+            for page_data in iter_pages(job.path, self._page_params(job, page), **kwargs):
                 self._persist_page(run_id, job, page_data)
                 page = page_data.page_number + 1
         self._notify("job_finished", job_name=job.name, next_page=page)
@@ -220,13 +259,21 @@ class SyncRunner:
         self._notify("fetch_started", job_name=job.name, page_number=page, path=job.path)
         fetch_started = monotonic()
         try:
-            page_data = self.client.fetch_page(job.path, request_params, accept=job.accept)
+            page_data = self._call_fetch_page_sync(job.path, request_params, accept=job.accept, use_auth=job.requires_auth)
         except Exception as exc:
             setattr(exc, "job_name", job.name)
             setattr(exc, "page_number", page)
             raise
         self._notify_fetch_finished(job, page_data, elapsed_seconds=monotonic() - fetch_started)
         return page_data
+
+    def _call_fetch_page_sync(self, path: str, params: dict[str, Any], *, accept: str, use_auth: bool):
+        fetch_page = getattr(self.client, "fetch_page")
+        if _supports_keyword(fetch_page, "use_auth"):
+            return fetch_page(path, params, accept=accept, use_auth=use_auth)
+        if use_auth:
+            raise TypeError("authenticated jobs require a client fetch_page method that accepts use_auth")
+        return fetch_page(path, params, accept=accept)
 
     def _notify_fetch_finished(self, job: EndpointJob, page_data, *, elapsed_seconds: float) -> None:
         self._notify(
@@ -307,7 +354,16 @@ class AsyncSyncRunner(SyncRunner):
     ):
         super().__init__(
             config=config,
-            client=client or AsyncComprasClient(config.base_url, token=config.token),
+            client=client
+            or AsyncComprasClient(
+                config.base_url,
+                token=config.token,
+                timeout=config.request_timeout,
+                max_retries=config.request_retries,
+                retry_backoff_seconds=config.retry_backoff_seconds,
+                rate_limit_sleep_seconds=config.rate_limit_sleep_seconds,
+                request_interval_seconds=config.delay_seconds,
+            ),
             jobs=jobs,
             reporter=reporter,
         )
@@ -340,12 +396,13 @@ class AsyncSyncRunner(SyncRunner):
             ),
         )
         self.logger.info(
-            "async run started run_id=%s base_url=%s scope=%s jobs=%d concurrency=%d",
+            "async run started run_id=%s base_url=%s scope=%s jobs=%d concurrency=%d delay_seconds=%.3f",
             run_id,
             self.config.base_url,
             self.config.scope,
             len(self.jobs),
             self.config.concurrency,
+            self.config.delay_seconds,
         )
         try:
             for index, job in enumerate(self.jobs, start=1):
@@ -421,7 +478,7 @@ class AsyncSyncRunner(SyncRunner):
         self._notify("fetch_started", job_name=job.name, page_number=page, path=job.path)
         fetch_started = monotonic()
         try:
-            page_data = await self._call_fetch_page_async(job.path, request_params, accept=job.accept)
+            page_data = await self._call_fetch_page_async(job.path, request_params, accept=job.accept, use_auth=job.requires_auth)
         except Exception as exc:
             setattr(exc, "job_name", job.name)
             setattr(exc, "page_number", page)
@@ -429,13 +486,18 @@ class AsyncSyncRunner(SyncRunner):
         self._notify_fetch_finished(job, page_data, elapsed_seconds=monotonic() - fetch_started)
         return page_data
 
-    async def _call_fetch_page_async(self, path: str, params: dict[str, Any], *, accept: str):
+    async def _call_fetch_page_async(self, path: str, params: dict[str, Any], *, accept: str, use_auth: bool):
         fetch_page = getattr(self.client, "fetch_page", None)
         if fetch_page is None:
             raise TypeError("async sync requires a client with fetch_page")
+        kwargs: dict[str, Any] = {"accept": accept}
+        if _supports_keyword(fetch_page, "use_auth"):
+            kwargs["use_auth"] = use_auth
+        elif use_auth:
+            raise TypeError("authenticated jobs require a client fetch_page method that accepts use_auth")
         if inspect.iscoroutinefunction(fetch_page):
-            return await fetch_page(path, params, accept=accept)
-        return await asyncio.to_thread(fetch_page, path, params, accept=accept)
+            return await fetch_page(path, params, **kwargs)
+        return await asyncio.to_thread(fetch_page, path, params, **kwargs)
 
     def _known_last_page(self, page_data, accept: str) -> int | None:
         if accept == "csv" or not isinstance(page_data.raw, dict):

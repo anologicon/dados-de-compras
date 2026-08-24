@@ -10,6 +10,7 @@ import duckdb
 
 
 DEFAULT_DB_PREFIX = Path("dados_abertos_compras")
+DEFAULT_OPS_DIR_NAME = "ops"
 
 
 def _base_prefix_path(base_path: str | Path) -> Path:
@@ -33,7 +34,7 @@ def derive_bronze_db_path(base_path: str | Path) -> Path:
 
 def derive_ops_db_path(base_path: str | Path) -> Path:
     prefix = _base_prefix_path(base_path)
-    return prefix.with_name(f"{prefix.name}_ops.sqlite")
+    return prefix.parent / DEFAULT_OPS_DIR_NAME / f"{prefix.name}_ops.sqlite"
 
 
 class BronzeWarehouse:

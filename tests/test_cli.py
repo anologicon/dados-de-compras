@@ -49,13 +49,47 @@ def test_cli_sync_invokes_runner(monkeypatch, tmp_path: Path):
     assert dummy.ran is True
     assert captured["reporter"] is not None
     assert captured["config"].token == "abc"
-    assert captured["config"].ops_db_path == tmp_path / "compras_ops.sqlite"
+    assert captured["config"].ops_db_path == tmp_path / "ops" / "compras_ops.sqlite"
     assert captured["config"].bronze_db_path == tmp_path / "compras_bronze.duckdb"
     assert captured["config"].endpoints == ("consultarContratacoes_PNCP_14133",)
     assert captured["config"].state_uf == "SP"
     assert captured["config"].municipality_code == 3550308
     assert captured["config"].pncp_modalidade_codes == (8, 10)
     assert captured["config"].purchase_sources == ()
+
+
+def test_cli_rate_limit_flags_are_passed_to_config(monkeypatch, tmp_path: Path):
+    dummy = DummyRunner()
+    captured = {}
+
+    def fake_build_runner(config, reporter=None):
+        captured["config"] = config
+        return dummy
+
+    monkeypatch.setattr(cli, "build_runner", fake_build_runner)
+
+    exit_code = cli.main([
+        "sync",
+        "--db-path",
+        str(tmp_path / "compras.duckdb"),
+        "--operation",
+        "consultarUasg",
+        "--delay-seconds",
+        "2.5",
+        "--rate-limit-sleep-seconds",
+        "120",
+        "--request-timeout",
+        "10",
+        "--request-retries",
+        "7",
+    ])
+
+    assert exit_code == 0
+    assert dummy.ran is True
+    assert captured["config"].delay_seconds == 2.5
+    assert captured["config"].rate_limit_sleep_seconds == 120
+    assert captured["config"].request_timeout == 10
+    assert captured["config"].request_retries == 7
 
 
 def test_cli_async_flags_are_passed_to_config(monkeypatch, tmp_path: Path):
@@ -107,7 +141,7 @@ def test_cli_accepts_explicit_bronze_db_path(monkeypatch, tmp_path: Path):
 
     assert exit_code == 0
     assert captured["config"].bronze_db_path == tmp_path / "raw.duckdb"
-    assert captured["config"].ops_db_path == tmp_path / "base_ops.sqlite"
+    assert captured["config"].ops_db_path == tmp_path / "ops" / "base_ops.sqlite"
 
 
 def test_cli_loads_token_from_dotenv(monkeypatch, tmp_path: Path):
@@ -126,7 +160,7 @@ def test_cli_loads_token_from_dotenv(monkeypatch, tmp_path: Path):
     exit_code = cli.main(["sync", "--db-path", str(tmp_path / "compras.duckdb"), "--operation", "consultarUasg"])
 
     assert exit_code == 0
-    assert captured["config"].ops_db_path == tmp_path / "compras_ops.sqlite"
+    assert captured["config"].ops_db_path == tmp_path / "ops" / "compras_ops.sqlite"
     assert captured["config"].bronze_db_path == tmp_path / "compras_bronze.duckdb"
     assert captured["config"].token == "from-dotenv"
 
@@ -257,6 +291,80 @@ def test_cli_rejects_unsafe_tokened_base_url(monkeypatch, tmp_path: Path):
             "--operation",
             "consultarUasg",
         ])
+
+
+def test_cli_full_city_invokes_full_city_crawler(monkeypatch, tmp_path: Path):
+    from compras_crawler import full_city
+
+    captured = {}
+
+    def fake_run_full_city_crawl(config, reporter=None):
+        captured["config"] = config
+        return full_city.FullCityResult(
+            run_id="run-full-city",
+            bronze_db_path=config.bronze_db_path,
+            ops_db_path=config.ops_db_path,
+            stats={},
+            errors=(),
+        )
+
+    monkeypatch.setenv("COMPRAS_GOV_TOKEN", "abc")
+    monkeypatch.setattr(full_city, "run_full_city_crawl", fake_run_full_city_crawl)
+
+    exit_code = cli.main([
+        "full-city",
+        "--db-path",
+        str(tmp_path / "floripa"),
+        "--start-date",
+        "2026-01-01",
+        "--end-date",
+        "2026-12-31",
+        "--state-uf",
+        "SC",
+        "--municipality-code",
+        "4205407",
+        "--max-purchases",
+        "10",
+        "--no-reference-catalogs",
+    ])
+
+    assert exit_code == 0
+    assert captured["config"].token == "abc"
+    assert captured["config"].bronze_db_path == tmp_path / "floripa_bronze.duckdb"
+    assert captured["config"].ops_db_path == tmp_path / "ops" / "floripa_ops.sqlite"
+    assert captured["config"].municipality_code == 4205407
+    assert captured["config"].state_uf == "SC"
+    assert captured["config"].max_purchases == 10
+    assert captured["config"].include_reference_catalogs is False
+
+
+def test_cli_full_city_dry_run_does_not_call_api(monkeypatch, tmp_path: Path, capsys):
+    from compras_crawler import full_city
+
+    def fail_run_full_city_crawl(config, reporter=None):
+        raise AssertionError("should not call API on dry-run")
+
+    monkeypatch.setattr(full_city, "run_full_city_crawl", fail_run_full_city_crawl)
+
+    exit_code = cli.main([
+        "full-city",
+        "--db-path",
+        str(tmp_path / "floripa"),
+        "--start-date",
+        "2026-01-01",
+        "--end-date",
+        "2026-12-31",
+        "--state-uf",
+        "SC",
+        "--municipality-code",
+        "4205407",
+        "--dry-run",
+    ])
+
+    assert exit_code == 0
+    output = capsys.readouterr().out
+    assert "Full-city crawl plan" in output
+    assert "4205407/SC" in output
 
 
 def test_cli_uses_municipality_purchase_mode(monkeypatch, tmp_path: Path):

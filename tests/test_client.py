@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 import pytest
 
+import compras_crawler.client as client_module
 from compras_crawler.client import ComprasClient
 
 
@@ -13,6 +14,7 @@ class FakeResponse:
     text_data: str = ""
     status_code: int = 200
     content_type: str = "application/json"
+    extra_headers: dict[str, str] | None = None
 
     def json(self):
         if self.json_data is None:
@@ -29,7 +31,10 @@ class FakeResponse:
 
     @property
     def headers(self):
-        return {"content-type": self.content_type}
+        headers = {"content-type": self.content_type}
+        if self.extra_headers:
+            headers.update(self.extra_headers)
+        return headers
 
 
 class FakeSession:
@@ -42,22 +47,31 @@ class FakeSession:
         return self.responses.pop(0)
 
 
-def test_iter_pages_json_uses_pagination_and_token():
+def test_iter_pages_json_uses_pagination_and_auth_only_when_requested():
     session = FakeSession(
         [
             FakeResponse(json_data={"resultado": [{"codigoUasg": "1"}], "paginasRestantes": 1}),
             FakeResponse(json_data={"resultado": [{"codigoUasg": "2"}], "paginasRestantes": 0}),
         ]
     )
-    client = ComprasClient("https://dadosabertos.compras.gov.br", token="abc", session=session)
+    client = ComprasClient("https://dadosabertos.compras.gov.br", token="abc", session=session, request_interval_seconds=0)
 
-    pages = list(client.iter_pages("/modulo-uasg/1_consultarUasg", {"statusUasg": True}))
+    pages = list(client.iter_pages("/modulo-uasg/1_consultarUasg", {"statusUasg": True}, use_auth=True))
 
     assert [page.page_number for page in pages] == [1, 2]
     assert pages[0].records == [{"codigoUasg": "1"}]
     assert session.calls[0]["headers"]["Authorization"] == "Bearer abc"
     assert session.calls[0]["params"]["pagina"] == 1
     assert session.calls[1]["params"]["pagina"] == 2
+
+
+def test_fetch_page_does_not_send_token_by_default():
+    session = FakeSession([FakeResponse(json_data={"resultado": []})])
+    client = ComprasClient("https://dadosabertos.compras.gov.br", token="abc", session=session)
+
+    client.fetch_page("/modulo-uasg/1_consultarUasg", {"statusUasg": True})
+
+    assert "Authorization" not in session.calls[0]["headers"]
 
 
 def test_fetch_page_parses_csv():
@@ -80,6 +94,64 @@ def test_client_allows_https_custom_host_without_token():
     page = client.fetch_page("/path", {"pagina": 1})
 
     assert page.url == "https://example.com/path"
+
+
+def test_client_waits_between_requests_when_interval_is_configured(monkeypatch):
+    current_time = 0.0
+    sleeps: list[float] = []
+
+    def fake_monotonic():
+        return current_time
+
+    def fake_sleep(seconds):
+        nonlocal current_time
+        sleeps.append(seconds)
+        current_time += seconds
+
+    monkeypatch.setattr(client_module, "monotonic", fake_monotonic)
+    monkeypatch.setattr(client_module, "sleep", fake_sleep)
+    session = FakeSession([
+        FakeResponse(json_data={"resultado": []}),
+        FakeResponse(json_data={"resultado": []}),
+    ])
+    client = ComprasClient("https://dadosabertos.compras.gov.br", session=session, request_interval_seconds=1.5)
+
+    client.fetch_page("/path", {"pagina": 1})
+    client.fetch_page("/path", {"pagina": 2})
+
+    assert sleeps == [1.5]
+
+
+def test_client_uses_long_cooldown_after_429(monkeypatch):
+    current_time = 0.0
+    sleeps: list[float] = []
+
+    def fake_monotonic():
+        return current_time
+
+    def fake_sleep(seconds):
+        nonlocal current_time
+        sleeps.append(seconds)
+        current_time += seconds
+
+    monkeypatch.setattr(client_module, "monotonic", fake_monotonic)
+    monkeypatch.setattr(client_module, "sleep", fake_sleep)
+    session = FakeSession([
+        FakeResponse(json_data={"erro": "rate limit"}, status_code=429),
+        FakeResponse(json_data={"resultado": []}),
+    ])
+    client = ComprasClient(
+        "https://dadosabertos.compras.gov.br",
+        session=session,
+        max_retries=1,
+        rate_limit_sleep_seconds=60.0,
+    )
+
+    page = client.fetch_page("/path", {"pagina": 1})
+
+    assert page.status_code == 200
+    assert sleeps == [60.0]
+    assert len(session.calls) == 2
 
 
 def test_client_rejects_http_base_url():

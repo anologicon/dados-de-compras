@@ -28,6 +28,16 @@ class FakeAsyncClient:
         return self.pages_by_number[page_number]
 
 
+class FakeAuthAwareClient:
+    def __init__(self, page: PageData):
+        self.page = page
+        self.calls: list[dict[str, object]] = []
+
+    def fetch_page(self, path, params, accept="json", use_auth=False):
+        self.calls.append({"path": path, "params": params, "accept": accept, "use_auth": use_auth})
+        return self.page
+
+
 def test_build_jobs_for_config_uses_municipality_purchase_manifest(tmp_path: Path):
     config = SyncConfig(
         db_path=tmp_path / "compras.duckdb",
@@ -88,6 +98,51 @@ def test_sync_runner_lands_bronze_pages_only(tmp_path: Path):
     with runner.ops_store.connect() as con:
         row = con.execute("select status, bronze_db_path from ops_runs where run_id = ?", [run_id]).fetchone()
         assert row == ("finished", str(tmp_path / "compras_bronze.duckdb"))
+
+
+def test_sync_runner_passes_use_auth_only_for_authenticated_jobs(tmp_path: Path):
+    public_job = EndpointJob(
+        name="public",
+        operation_id="publicOp",
+        path="/public",
+        entity_name="public",
+        key_fields=("id",),
+        base_params={},
+    )
+    protected_job = EndpointJob(
+        name="protected",
+        operation_id="protectedOp",
+        path="/protected",
+        entity_name="protected",
+        key_fields=("id",),
+        base_params={},
+        requires_auth=True,
+    )
+    page = PageData(
+        url="https://dadosabertos.compras.gov.br/path",
+        page_number=1,
+        params={"pagina": 1},
+        records=[],
+        raw={"resultado": [], "paginasRestantes": 0},
+        content_type="application/json",
+        status_code=200,
+    )
+    client = FakeAuthAwareClient(page)
+    runner = SyncRunner(
+        config=SyncConfig(
+            db_path=tmp_path / "compras.duckdb",
+            ops_db_path=tmp_path / "compras_ops.sqlite",
+            base_url="https://dadosabertos.compras.gov.br",
+            token="abc",
+            resume=False,
+        ),
+        client=client,
+        jobs=(public_job, protected_job),
+    )
+
+    runner.run()
+
+    assert [call["use_auth"] for call in client.calls] == [False, True]
 
 
 def test_build_runner_uses_async_runner_when_enabled(tmp_path: Path):

@@ -24,7 +24,7 @@
 - Pagination uses `pagina` and often 1-based numbering
 - Dates are usually `YYYY-MM-DD`
 - CSV endpoints may be selected via `Accept: text/csv`
-- Auth uses bearer token when needed (`COMPRAS_GOV_TOKEN`, optionally loaded from `.env`)
+- Auth uses bearer token only for jobs/endpoints marked as requiring it (`COMPRAS_GOV_TOKEN`, optionally loaded from `.env`)
 - `--base-url` must use HTTPS; tokened runs are restricted to `https://dadosabertos.compras.gov.br`
 - The crawler stores raw Bronze pages only; Silver/Gold deduping and marts are out of scope here
 
@@ -32,7 +32,7 @@
 ```bash
 compras-crawler sync --db-path dados_abertos_compras
 ```
-`--db-path` is a base/prefix. The example above creates `dados_abertos_compras_bronze.duckdb` and `dados_abertos_compras_ops.sqlite`. Passing `--db-path compras.duckdb` derives `compras_bronze.duckdb` for compatibility.
+`--db-path` is a base/prefix. The example above creates `dados_abertos_compras_bronze.duckdb` and `ops/dados_abertos_compras_ops.sqlite`. Passing `--db-path compras.duckdb` derives `compras_bronze.duckdb` and `ops/compras_ops.sqlite` for compatibility.
 
 Default output is an enriched terminal UI: full-screen TUI when running on a TTY, and friendly console progress when output is captured or redirected.
 
@@ -41,6 +41,17 @@ Guided interactive menu/TUI:
 compras-crawler menu
 ```
 The menu is a step-by-step wizard with contextual help (`?`), validated inputs, operation selection by number/id/range, and a final command review. Use `compras-crawler menu --dry-run` to build and print the equivalent `sync` command without executing it.
+
+Best-effort full public API crawl for one municipality (derives IDs and fans out to PNCP, UASG/órgão, legado, ARP, contratos, PGC, OCDS, fornecedores, catálogo, and pesquisa de preço endpoints):
+```bash
+compras-crawler full-city \
+  --start-date 2026-01-01 \
+  --end-date 2026-12-31 \
+  --state-uf SC \
+  --municipality-code 4205407 \
+  --db-path dados_abertos_compras_florianopolis_api_inteira
+```
+If `COMPRAS_GOV_TOKEN` is configured, `full-city` first calls endpoints without auth and only retries with Bearer auth after `401/403`. Protected/admin endpoints such as `USUARIOS` and `ALICE` are skipped by default.
 
 Swagger-style example:
 ```bash
@@ -51,9 +62,9 @@ Municipality-specific purchases:
 compras-crawler sync --municipality-code 4202909 --state-uf SC --source pncp --pncp-modalidade-code 8
 ```
 
-Concurrent page fetching with serial DuckDB writes:
+Concurrent page fetching with serial DuckDB writes (requests are still globally paced by `--delay-seconds` to avoid API rate limits):
 ```bash
-compras-crawler sync --operation consultarUasg --async --concurrency 5
+compras-crawler sync --operation consultarUasg --async --concurrency 5 --delay-seconds 1.0
 ```
 
 Useful flags:
@@ -66,6 +77,9 @@ Useful flags:
 - `--page-size`
 - `--async` to fetch pages concurrently while preserving serial writes
 - `--concurrency 5` to control the async page-fetch fanout
+- `--delay-seconds 1.0` minimum delay between HTTP requests to avoid 429 rate limits
+- `--rate-limit-sleep-seconds 60` cooldown used before retrying after HTTP 429
+- `--request-timeout 45` and `--request-retries 5` for HTTP robustness
 - `--operation consultarUasg|consultarLicitacao|consultarContratacoes_PNCP_14133|...` (repeatable)
 - `--state-uf SP` to restrict supported jobs by UF
 - `--municipality-code 3550308` + `--source pncp` + repeatable `--pncp-modalidade-code` values for city-specific purchase runs
