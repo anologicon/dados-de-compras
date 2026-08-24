@@ -76,6 +76,70 @@ def test_cli_loads_token_from_dotenv(monkeypatch, tmp_path: Path):
     assert captured["config"].token == "from-dotenv"
 
 
+def test_cli_ui_modes(monkeypatch, tmp_path: Path):
+    dummy = DummyRunner()
+    captured = {}
+
+    def fake_build_runner(config, reporter=None):
+        captured["reporter"] = reporter
+        return dummy
+
+    monkeypatch.setattr(cli, "build_runner", fake_build_runner)
+
+    exit_code = cli.main([
+        "sync",
+        "--db-path",
+        str(tmp_path / "compras.duckdb"),
+        "--operation",
+        "consultarUasg",
+        "--ui",
+        "console",
+    ])
+
+    assert exit_code == 0
+    assert isinstance(captured["reporter"], cli.ConsoleUI)
+
+    exit_code = cli.main([
+        "sync",
+        "--db-path",
+        str(tmp_path / "compras.duckdb"),
+        "--operation",
+        "consultarUasg",
+        "--ui",
+        "tui",
+    ])
+
+    assert exit_code == 0
+    assert isinstance(captured["reporter"], cli.TerminalTUI)
+
+    exit_code = cli.main([
+        "sync",
+        "--db-path",
+        str(tmp_path / "compras.duckdb"),
+        "--operation",
+        "consultarUasg",
+        "--ui",
+        "none",
+    ])
+
+    assert exit_code == 0
+    assert captured["reporter"] is None
+
+
+def test_cli_rejects_conflicting_ui_flags(tmp_path: Path):
+    with pytest.raises(SystemExit):
+        cli.main([
+            "sync",
+            "--db-path",
+            str(tmp_path / "compras.duckdb"),
+            "--operation",
+            "consultarUasg",
+            "--ui",
+            "console",
+            "--tui",
+        ])
+
+
 def test_cli_list_operations_outputs_catalog(capsys):
     exit_code = cli.main(["sync", "--list-operations"])
 

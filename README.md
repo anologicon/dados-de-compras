@@ -31,7 +31,13 @@
 ```bash
 compras-crawler sync --db-path compras.duckdb --ops-db-path compras_ops.sqlite
 ```
-Default output is a friendly live console UI with progress, ETA, spinner, and colors.
+Default output is an enriched terminal UI: full-screen TUI when running on a TTY, and friendly console progress when output is captured or redirected.
+
+Interactive menu:
+```bash
+compras-crawler menu
+```
+Use `compras-crawler menu --dry-run` to build and print the equivalent `sync` command without executing it.
 
 Swagger-style example:
 ```bash
@@ -53,7 +59,9 @@ Useful flags:
 - `--list-operations` to preview what will run
 - `--no-resume`
 - `--log-level DEBUG|INFO|WARNING|ERROR|CRITICAL`
-- `--no-ui` to disable the friendly console output
+- `--ui auto|tui|console|none` to choose the progress UI
+- `--tui` to force the full-screen terminal UI
+- `--no-ui` to disable progress UI output
 
 ## Data model
 DuckDB tables:

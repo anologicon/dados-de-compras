@@ -2,20 +2,25 @@ from __future__ import annotations
 
 import argparse
 import os
+import shlex
+import sys
 from pathlib import Path
-from typing import Sequence
+from typing import Any, Sequence
 
 from dotenv import load_dotenv
 
 from .log import configure_logging
 from .manifest import build_operation_catalog, default_date_window
 from .sync import SyncConfig, build_jobs_for_config, build_runner
-from .ui import ConsoleUI
+from .ui import ConsoleUI, TerminalTUI
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="compras-crawler")
     subparsers = parser.add_subparsers(dest="command", required=True)
+
+    menu_parser = subparsers.add_parser("menu", help="Open an interactive menu for sync options")
+    menu_parser.add_argument("--dry-run", action="store_true", help="Only print the generated sync command")
 
     sync_parser = subparsers.add_parser("sync", help="Run the Compras.gov.br sync pipeline")
     sync_parser.add_argument("--db-path", type=Path, default=Path("compras.duckdb"), help="DuckDB file path for synced data")
@@ -35,15 +40,53 @@ def build_parser() -> argparse.ArgumentParser:
     sync_parser.add_argument("--list-endpoints", action="store_true", help=argparse.SUPPRESS)
     sync_parser.add_argument("--no-resume", action="store_true", help="Start jobs from page 1 instead of checkpoints")
     sync_parser.add_argument("--log-level", default="WARNING", choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"], help="Console log level")
-    sync_parser.add_argument("--no-ui", action="store_true", help="Disable the friendly console UI")
+    sync_parser.add_argument(
+        "--ui",
+        choices=["auto", "tui", "console", "none"],
+        default="auto",
+        help="Progress UI mode: auto uses the full-screen TUI on a TTY and console output otherwise",
+    )
+    sync_parser.add_argument("--tui", action="store_true", help="Force the full-screen terminal UI")
+    sync_parser.add_argument("--no-ui", action="store_true", help="Disable progress UI output")
     sync_parser.add_argument("--resume", action="store_true", help=argparse.SUPPRESS)
     return parser
+
+
+def build_reporter(args: Any):
+    if args.tui and args.ui not in {"auto", "tui"}:
+        raise ValueError("--tui cannot be combined with --ui console/none")
+    if args.no_ui or args.ui == "none":
+        return None
+    mode = "tui" if args.tui else args.ui
+    if mode == "console":
+        return ConsoleUI()
+    if mode == "tui":
+        return TerminalTUI()
+    if mode == "auto":
+        return TerminalTUI() if sys.stdout.isatty() else ConsoleUI()
+    raise ValueError(f"Unknown UI mode: {mode}")
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     load_dotenv(dotenv_path=Path.cwd() / ".env")
     parser = build_parser()
     args = parser.parse_args(argv)
+
+    if args.command == "menu":
+        from .menu import InteractiveSyncMenu
+
+        menu = InteractiveSyncMenu()
+        sync_argv = menu.collect_sync_argv()
+        if sync_argv is None:
+            return 0
+        command = ["compras-crawler", "sync", *sync_argv]
+        print("\nComando equivalente:")
+        print(f"  {shlex.join(command)}")
+        if args.dry_run:
+            return 0
+        if not menu.confirm_run():
+            return 0
+        return main(["sync", *sync_argv])
 
     if args.command == "sync":
         configure_logging(args.log_level)
@@ -78,9 +121,17 @@ def main(argv: Sequence[str] | None = None) -> int:
             for spec in catalog:
                 print(f"{spec.operation_id}\t{spec.entity_name}\t{spec.path}\tjobs={','.join(spec.job_names)}")
             return 0
-        reporter = None if args.no_ui else ConsoleUI()
+        try:
+            reporter = build_reporter(args)
+        except ValueError as exc:
+            parser.error(str(exc))
         runner = build_runner(config, reporter=reporter)
-        runner.run()
+        try:
+            runner.run()
+        finally:
+            close = getattr(reporter, "close", None)
+            if close:
+                close()
         return 0
 
     parser.error(f"Unknown command: {args.command}")
