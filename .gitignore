@@ -8,6 +8,11 @@ __pycache__/
 context/
 *.duckdb
 *.duckdb-wal
+*.duckdb.wal
+*.sqlite
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
 dist/
 build/
 *.egg-info/

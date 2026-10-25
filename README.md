@@ -16,6 +16,8 @@
 - `src/compras_crawler/storage.py` — DuckDB schema and persistence
 - `src/compras_crawler/sync.py` — orchestration runner
 - `src/compras_crawler/cli.py` — CLI entrypoint (`compras-crawler sync`)
+- `src/compras_crawler/mcp_server.py` — read-only MCP server (`compras-crawler mcp` or `compras-mcp`)
+- `src/compras_crawler/project_access.py` — bounded documentation and database queries
 - `docs/API_COMPRAS_GOV.md` — API reference and conventions
 - `context/` — project notes and research
 
@@ -55,9 +57,25 @@ Useful flags:
 DuckDB tables:
 - `bronze_pages` — raw fetched pages
 - `silver_records` — normalized upserts
+
+SQLite operations tables (`compras_ops.sqlite` by default):
 - `ops_runs` — sync runs
 - `ops_checkpoints` — resume state
 - `ops_errors` — failures
+
+## MCP para agentes
+
+Instale o suporte opcional e inicie o servidor local via `stdio`:
+
+```bash
+python3 -m venv .venv
+.venv/bin/python -m pip install -e ".[mcp]"
+.venv/bin/compras-crawler mcp --db-path compras.duckdb --project-root .
+# Equivalente: .venv/bin/compras-mcp --db-path compras.duckdb --project-root .
+```
+
+O processo aguarda um cliente MCP; não é uma interface interativa. Veja
+[docs/MCP.md](docs/MCP.md) para configurar agentes, consultar as ferramentas e executar testes.
 
 ## When editing
 - Prefer small, targeted changes

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import builtins
 from pathlib import Path
 
 import pytest
@@ -14,6 +15,23 @@ class DummyRunner:
     def run(self):
         self.ran = True
         return "run-1"
+
+
+def test_mcp_command_explains_missing_optional_dependency(monkeypatch, capsys):
+    original_import = builtins.__import__
+
+    def without_mcp(name, *args, **kwargs):
+        if name == "mcp" or name.startswith("mcp."):
+            raise ModuleNotFoundError("No module named 'mcp'", name="mcp")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", without_mcp)
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["mcp"])
+    assert exc.value.code == 2
+    captured = capsys.readouterr()
+    assert 'pip install -e ".[mcp]"' in captured.err
+    assert captured.out == ""
 
 
 def test_cli_sync_invokes_runner(monkeypatch, tmp_path: Path):

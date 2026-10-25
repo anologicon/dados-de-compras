@@ -17,6 +17,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="compras-crawler")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
+    from .mcp_server import add_arguments
+
+    mcp_parser = subparsers.add_parser("mcp", help="Serve read-only project information over MCP stdio")
+    add_arguments(mcp_parser)
+
     sync_parser = subparsers.add_parser("sync", help="Run the Compras.gov.br sync pipeline")
     sync_parser.add_argument("--db-path", type=Path, default=Path("compras.duckdb"), help="DuckDB file path for synced data")
     sync_parser.add_argument("--ops-db-path", type=Path, default=None, help="SQLite file path for operation metadata")
@@ -40,11 +45,16 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    load_dotenv(dotenv_path=Path.cwd() / ".env")
     parser = build_parser()
     args = parser.parse_args(argv)
 
+    if args.command == "mcp":
+        from .mcp_server import run_from_args
+
+        return run_from_args(args, parser)
+
     if args.command == "sync":
+        load_dotenv(dotenv_path=Path.cwd() / ".env")
         configure_logging(args.log_level)
         start_date = args.start_date or default_date_window()[0]
         end_date = args.end_date or default_date_window()[1]
