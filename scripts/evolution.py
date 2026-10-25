@@ -43,6 +43,14 @@ def digest(value):
     return hashlib.sha256(canonical(value)).hexdigest()
 
 
+def file_hash(path):
+    result = hashlib.sha256()
+    with Path(path).open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            result.update(chunk)
+    return result.hexdigest()
+
+
 def text(value):
     return isinstance(value, str) and bool(value.strip()) and "\0" not in value
 
@@ -279,7 +287,7 @@ class Workflow:
                         process.wait()
                         code = -1
                         receipt["timed_out"] = True
-                receipt.update(exit_code=code, finished_at=now(), log_hash=hashlib.sha256(log.read_bytes()).hexdigest())
+                receipt.update(exit_code=code, finished_at=now(), log_hash=file_hash(log))
                 receipts.append(receipt)
                 require(code == 0, f"Verificação falhou: {command['name']}; consulte {log}")
             self.lane(state, committed=True)
@@ -300,7 +308,7 @@ class Workflow:
                 "Verificações ausentes ou obsoletas; execute check no HEAD atual")
         for command in checks["commands"]:
             log = Path(command["log"])
-            require(log.is_file() and hashlib.sha256(log.read_bytes()).hexdigest() == command["log_hash"], "Log de verificação ausente/alterado")
+            require(log.is_file() and file_hash(log) == command["log_hash"], "Log de verificação ausente/alterado")
         return revision
 
     def review(self, state, report):

@@ -351,3 +351,63 @@ def test_invalid_packets_are_rejected(packet, change):
     change(packet)
     with pytest.raises(WorkflowError):
         module.validate_packet(packet)
+
+
+def test_allocation_failure_is_journaled_and_not_retried(workflow, packet):
+    state = workflow.propose(packet)
+    workflow.approve(state, "operator approval", [])
+    # A foreign pre-existing branch must not be overwritten or deleted.
+    git(workflow.repo, "branch", f"evolution/{state['id']}")
+    with pytest.raises(WorkflowError, match="Git recusou"):
+        workflow.start(state)
+    recovered = workflow.load(state["id"])
+    assert recovered["status"] == "blocked"
+    assert recovered["blocked_kind"] == "allocation"
+    assert recovered["worktree"]
+    with pytest.raises(WorkflowError, match="Alocação incerta"):
+        workflow.resume(recovered)
+    assert git(workflow.repo, "rev-parse", f"evolution/{state['id']}") == state["base"]
+
+
+def test_report_tampering_and_wrong_lane_branch_refused(workflow, packet):
+    state = ready(workflow, packet)
+    path = Path(state["review"]["path"])
+    stored = module.load_json(path)
+    stored["verdict"] = "block"
+    module.atomic_json(path, stored)
+    with pytest.raises(WorkflowError, match="Relatório de revisão mudou"):
+        workflow.accept(state, "must not accept altered evidence")
+    git(state["worktree"], "checkout", "-b", "foreign-branch")
+    with pytest.raises(WorkflowError, match="Branch da worktree mudou"):
+        workflow.accept(state, "must not accept foreign lane")
+
+
+def test_cli_happy_path_is_a_real_process_restart_pilot(workflow, packet, tmp_path):
+    packet_path = tmp_path / "packet-cli.json"
+    module.atomic_json(packet_path, packet)
+    base = git(workflow.repo, "rev-parse", "HEAD")
+    prefix = [sys.executable, str(SCRIPT), "--repo", str(workflow.repo)]
+
+    def call(*args):
+        result = subprocess.run(prefix + list(args), text=True, capture_output=True)
+        assert result.returncode == 0, result.stderr
+        return json.loads(result.stdout)
+
+    state = call("propose", "--packet", str(packet_path))
+    cycle_id = state["id"]
+    call("approve", cycle_id, "--approval", "human approved synthetic pilot")
+    state = call("start", cycle_id)
+    call("assign", cycle_id, "--implementer", "native-pilot-writer")
+    commit(state["worktree"])
+    call("pause", cycle_id, "--reason", "simulated safe interruption; native child reconciled")
+    state = call("resume", cycle_id)
+    state = call("check", cycle_id)
+    report_path = tmp_path / "independent-report.json"
+    module.atomic_json(report_path, report(workflow, state, reviewer="native-pilot-reviewer"))
+    state = call("review", cycle_id, "--report", str(report_path))
+    assert state["status"] == "ready"
+    call("accept", cycle_id, "--approval", "human accepted synthetic revision")
+    assert git(workflow.repo, "rev-parse", "HEAD") == base
+    state = call("integrate", cycle_id, "--approval", "human separately authorized local ff integration")
+    assert state["status"] == "integrated"
+    assert call("status", cycle_id)["integration"]["revision"] == git(workflow.repo, "rev-parse", "HEAD")
