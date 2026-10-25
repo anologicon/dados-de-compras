@@ -13,6 +13,11 @@ vivos após reload. IDs declarados num relatório não autenticam proveniência.
 Resuma fato verificado, evidência ausente, limites e próximo comando permitido.
 Compare controller e runtime: `pause/resume` do controlador não para/retoma agente.
 Checking interrompido exige reconciliação explícita e pause antes de resume.
+Se cancelled, informe que o ciclo terminou mas worktree/branch/artefatos continuam
+preservados; isso não prova que filhos foram parados nem autoriza retomada/limpeza.
+Se o operador quiser abandonar um ciclo não terminal, apresente como próximo passo
+reconciliar/parar filhos e obter decisão humana explícita antes de o coordenador
+usar `cancel ID --approval TEXT`. Este comando de status não cancela por si só.
 Não escreva fontes/estado manualmente, não faça start/resume/assign/check, não
 relance workflow ou filho automaticamente, não limpe worktrees nem aceite trabalho.
 Se houver divergência ou dono desconhecido, marque pendência e peça decisão humana.
