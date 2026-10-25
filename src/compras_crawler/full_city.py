@@ -2,16 +2,17 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass, field
+from datetime import date
 from pathlib import Path
 from time import sleep
 from typing import Any, Iterable
-import json
 import re
 
 import requests
 
 from .client import ComprasClient, PageData, retry_after_seconds, validate_base_url
-from .normalize import extract_records, stable_hash, stable_json
+from .crawl_state import CrawlState, CrawlStopped
+from .normalize import stable_hash, stable_json
 from .storage import DEFAULT_DB_PREFIX, BronzeWarehouse, SqliteOpsStore, derive_bronze_db_path, derive_ops_db_path
 
 DEFAULT_BASE_URL = "https://dadosabertos.compras.gov.br"
@@ -50,6 +51,7 @@ class FullCityConfig:
     request_timeout: float = 45.0
     request_retries: int = 5
     resume: bool = True
+    collection_id: str | None = None
     include_reference_catalogs: bool = True
     include_price_research: bool = True
     include_csv_variants: bool = False
@@ -61,6 +63,8 @@ class FullCityConfig:
         object.__setattr__(self, "ops_db_path", Path(self.ops_db_path) if self.ops_db_path else derive_ops_db_path(self.db_path))
         object.__setattr__(self, "state_uf", self.state_uf.strip().upper())
         validate_base_url(self.base_url, token=self.token)
+        if date.fromisoformat(self.start_date) > date.fromisoformat(self.end_date):
+            raise ValueError("start_date must not be after end_date")
         if len(self.state_uf) != 2:
             raise ValueError("state_uf must be a 2-letter UF abbreviation")
         if self.municipality_code <= 0:
@@ -93,17 +97,23 @@ class FullCityResult:
 
 
 class FullCityCrawler:
-    def __init__(self, config: FullCityConfig, *, reporter: Any | None = None):
+    def __init__(self, config: FullCityConfig, *, reporter: Any | None = None,
+                 control: Any | None = None, throttle: Any | None = None):
         self.config = config
         self.reporter = reporter
+        self.control = control
         self.client = ComprasClient(
             config.base_url,
             token=config.token,
             timeout=config.request_timeout,
             max_retries=config.request_retries,
             rate_limit_sleep_seconds=config.rate_limit_sleep_seconds,
+            request_interval_seconds=config.delay_seconds,
+            throttle=throttle,
+            sleep_fn=self._sleep,
         )
         self.warehouse = BronzeWarehouse(config.bronze_db_path)
+        self.crawl_state = CrawlState(self.warehouse)
         self.ops_store = SqliteOpsStore(config.ops_db_path)
         self.run_id = ""
         self.stats: dict[str, dict[str, int]] = defaultdict(lambda: {"pages": 0, "records": 0, "errors": 0, "auth_retries": 0})
@@ -112,6 +122,7 @@ class FullCityCrawler:
 
     def run(self) -> FullCityResult:
         self.warehouse.init_schema()
+        self.crawl_state.init_schema()
         self.ops_store.init_schema()
         self.run_id = self.ops_store.start_run(
             base_url=self.config.base_url,
@@ -123,7 +134,12 @@ class FullCityCrawler:
         status = "finished"
         try:
             self._run_phases()
-        except Exception:
+            if self.errors:
+                status = "partial"
+        except CrawlStopped:
+            status = "stopped"
+            raise
+        except BaseException:
             status = "failed"
             raise
         finally:
@@ -281,14 +297,15 @@ class FullCityCrawler:
 
     def _crawl_legado(self, units: list[str]) -> list[dict[str, Any]]:
         records: list[dict[str, Any]] = []
-        year = int(self.config.start_date[:4])
+        years = range(int(self.config.start_date[:4]), int(self.config.end_date[:4]) + 1)
         for unit in units:
             unit_job = sanitize(unit)
             records.extend(self.fetch_paginated(job_name=f"legado_licitacao_uasg_{unit_job}", entity_name="licitacao", path="/modulo-legado/1_consultarLicitacao", params={"data_publicacao_inicial": self.config.start_date, "data_publicacao_final": self.config.end_date, "uasg": unit}))
             records.extend(self.fetch_paginated(job_name=f"legado_pregoes_uasg_{unit_job}", entity_name="pregao", path="/modulo-legado/3_consultarPregoes", params={"dt_data_edital_inicial": self.config.start_date, "dt_data_edital_final": self.config.end_date, "co_uasg": unit}))
             records.extend(self.fetch_paginated(job_name=f"legado_itens_pregoes_uasg_{unit_job}", entity_name="pregao_item", path="/modulo-legado/4_consultarItensPregoes", params={"dt_hom_inicial": self.config.start_date, "dt_hom_final": self.config.end_date, "co_uasg": unit}))
-            records.extend(self.fetch_paginated(job_name=f"legado_compras_sem_licitacao_uasg_{unit_job}", entity_name="compra_sem_licitacao", path="/modulo-legado/5_consultarComprasSemLicitacao", params={"dt_ano_aviso": year, "co_uasg": unit}))
-            records.extend(self.fetch_paginated(job_name=f"legado_itens_sem_licitacao_uasg_{unit_job}", entity_name="compra_sem_licitacao_item", path="/modulo-legado/6_consultarCompraItensSemLicitacao", params={"dt_ano_aviso_licitacao": year, "co_uasg": unit}))
+            for year in years:
+                records.extend(self.fetch_paginated(job_name=f"legado_compras_sem_licitacao_uasg_{unit_job}_{year}", entity_name="compra_sem_licitacao", path="/modulo-legado/5_consultarComprasSemLicitacao", params={"dt_ano_aviso": year, "co_uasg": unit}))
+                records.extend(self.fetch_paginated(job_name=f"legado_itens_sem_licitacao_uasg_{unit_job}_{year}", entity_name="compra_sem_licitacao_item", path="/modulo-legado/6_consultarCompraItensSemLicitacao", params={"dt_ano_aviso_licitacao": year, "co_uasg": unit}))
             records.extend(self.fetch_paginated(job_name=f"legado_rdc_uasg_{unit_job}", entity_name="rdc", path="/modulo-legado/7_consultarRdc", params={"data_publicacao_min": self.config.start_date, "data_publicacao_max": self.config.end_date, "uasg": unit, "uf_uasg": self.config.state_uf}))
         return records
 
@@ -348,23 +365,23 @@ class FullCityCrawler:
 
     def _crawl_pgc(self, orgao_codes: list[str]) -> list[dict[str, Any]]:
         records: list[dict[str, Any]] = []
-        year = int(self.config.start_date[:4])
-        for orgao in orgao_codes:
-            records.extend(self.fetch_paginated(job_name=f"pgc_detalhe_orgao_{sanitize(orgao)}_{year}", entity_name="pgc_detalhe", path="/modulo-pgc/1_consultarPgcDetalhe", params={"orgao": orgao, "anoPcaProjetoCompra": year}))
-            records.extend(self.fetch_paginated(job_name=f"pgc_agregacao_orgao_{sanitize(orgao)}_{year}", entity_name="pgc_agregacao", path="/modulo-pgc/3_consultarPgcAgregacao", params={"orgao": orgao, "ano": year}))
+        for year in range(int(self.config.start_date[:4]), int(self.config.end_date[:4]) + 1):
+            for orgao in orgao_codes:
+                records.extend(self.fetch_paginated(job_name=f"pgc_detalhe_orgao_{sanitize(orgao)}_{year}", entity_name="pgc_detalhe", path="/modulo-pgc/1_consultarPgcDetalhe", params={"orgao": orgao, "anoPcaProjetoCompra": year}))
+                records.extend(self.fetch_paginated(job_name=f"pgc_agregacao_orgao_{sanitize(orgao)}_{year}", entity_name="pgc_agregacao", path="/modulo-pgc/3_consultarPgcAgregacao", params={"orgao": orgao, "ano": year}))
         return records
 
     def _crawl_pgc_catalogo(self, pgc_records: list[dict[str, Any]]) -> None:
-        year = int(self.config.start_date[:4])
         pairs = set()
         for row in pgc_records:
             tipo = first_present(row, "tipoItem", "tipo", "materialOuServico")
             codigo = first_present(row, "codigoItem", "codigoItemCatalogo", "codigoServico", "codigoMaterial")
             if tipo and codigo:
                 pairs.add((str(tipo), str(codigo)))
-        for tipo, codigo in sorted(pairs):
-            key = f"{sanitize(tipo)}_{sanitize(codigo)}"
-            self.fetch_paginated(job_name=f"pgc_catalogo_{key}_{year}", entity_name="pgc_catalogo", path="/modulo-pgc/2_consultarPgcDetalheCatalogo", params={"anoPcaProjetoCompra": year, "tipo": tipo, "codigo": codigo}, max_pages=20)
+        for year in range(int(self.config.start_date[:4]), int(self.config.end_date[:4]) + 1):
+            for tipo, codigo in sorted(pairs):
+                key = f"{sanitize(tipo)}_{sanitize(codigo)}"
+                self.fetch_paginated(job_name=f"pgc_catalogo_{key}_{year}", entity_name="pgc_catalogo", path="/modulo-pgc/2_consultarPgcDetalheCatalogo", params={"anoPcaProjetoCompra": year, "tipo": tipo, "codigo": codigo}, max_pages=20)
 
     def _crawl_ocds(self, buyer_ids: list[str]) -> None:
         for buyer_id in buyer_ids:
@@ -440,33 +457,55 @@ class FullCityCrawler:
             self.fetch_paginated(job_name=f"pesquisa_preco_servico_{sanitize(code)}", entity_name="price_service", path="/modulo-pesquisa-preco/3_consultarServico", params={"codigoItemCatalogo": code, "estado": self.config.state_uf, "codigoMunicipio": self.config.municipality_code, "dataCompraInicio": self.config.start_date, "dataCompraFim": self.config.end_date}, max_pages=20)
             self.fetch_paginated(job_name=f"pesquisa_preco_servico_detalhe_{sanitize(code)}", entity_name="price_service_detail", path="/modulo-pesquisa-preco/4_consultarServicoDetalhe", params={"codigoItemCatalogo": code, "dataCompraInicio": self.config.start_date, "dataCompraFim": self.config.end_date}, max_pages=20)
 
-    def fetch_paginated(self, *, job_name: str, entity_name: str, path: str, params: dict[str, Any], max_pages: int | None = None) -> list[dict[str, Any]]:
-        if self.config.resume and self._job_has_pages(job_name):
-            records = self._load_job_records(job_name)
-            self._log(f"  {job_name}: resume skip records={len(records)}")
+    def fetch_paginated(self, *, job_name: str, entity_name: str, path: str, params: dict[str, Any], max_pages: int | None = None, single: bool = False) -> list[dict[str, Any]]:
+        self._check_stop()
+        key = stable_hash({"collection": self.config.collection_id or "cli", "base_url": self.config.base_url,
+                           "city": self.config.municipality_code, "uf": self.config.state_uf,
+                           "start": self.config.start_date, "end": self.config.end_date,
+                           "job": job_name, "path": path, "params": params,
+                           "page_size": self.config.page_size, "single": single})
+        state = self.crawl_state.open_job(key, job_name, resume=self.config.resume)
+        pages = self.crawl_state.load_pages(key, job_name, state["generation"])
+        records = self.crawl_state.records(pages)
+        if state["complete"]:
+            self._log(f"  {job_name}: retomado, completo, records={len(records)}")
             return records
-        records: list[dict[str, Any]] = []
-        page = 1
-        seen_hashes: set[str] = set()
+        page = state["next_page"]
+        seen_hashes = {digest for _, _, digest in pages}
         limit = max_pages if max_pages is not None else self.config.max_pages_per_job
         while page <= limit:
+            self._check_stop()
             request_params = dict(params)
-            if self.config.page_size is not None:
-                request_params.setdefault("tamanhoPagina", self.config.page_size)
-            request_params["pagina"] = page
+            if not single:
+                if self.config.page_size is not None:
+                    request_params.setdefault("tamanhoPagina", self.config.page_size)
+                request_params["pagina"] = page
             page_data, auth_used = self._fetch_page(job_name, path, request_params)
             if page_data is None:
                 break
             payload_hash = stable_hash(page_data.raw)
             if page > 1 and payload_hash in seen_hashes:
+                self._record_error(job_name, page, "repeated page before pagination completed", None)
                 break
             seen_hashes.add(payload_hash)
-            self._persist_page(job_name, entity_name, page_data, auth_used=auth_used)
-            self.ops_store.save_checkpoint(job_name, next_page=page + 1, payload_hash=payload_hash)
+            more = self._should_continue(page_data)
+            # Id endpoints have no pagination parameter in the API contract. Never silently truncate them.
+            if single:
+                more = isinstance(page_data.raw, dict) and (
+                    int(page_data.raw.get("paginasRestantes") or 0) > 0
+                    or int(page_data.raw.get("totalPaginas") or 0) > 1
+                )
+            self.crawl_state.commit_page(key=key, generation=state["generation"], job_name=job_name,
+                                        entity_name=entity_name, run_id=self.run_id, page=page_data,
+                                        complete=not more, auth_used=auth_used)
+            self.ops_store.save_checkpoint(key, next_page=page + 1, payload_hash=payload_hash)
             records.extend(page_data.records)
             self.stats[job_name]["pages"] += 1
             self.stats[job_name]["records"] += len(page_data.records)
-            if not self._should_continue(page_data):
+            if single and more:
+                self._record_error(job_name, page, "Id endpoint returned truncated data without pagination support", None)
+                break
+            if not more:
                 break
             page += 1
         if page > limit:
@@ -475,32 +514,24 @@ class FullCityCrawler:
         return records
 
     def fetch_once(self, *, job_name: str, entity_name: str, path: str, params: dict[str, Any]) -> list[dict[str, Any]]:
-        if self.config.resume and self._job_has_pages(job_name):
-            return self._load_job_records(job_name)
-        page_data, auth_used = self._fetch_page(job_name, path, dict(params))
-        if page_data is None:
-            return []
-        self._persist_page(job_name, entity_name, page_data, auth_used=auth_used)
-        self.ops_store.save_checkpoint(job_name, next_page=2, payload_hash=stable_hash(page_data.raw))
-        self.stats[job_name]["pages"] += 1
-        self.stats[job_name]["records"] += len(page_data.records)
-        return page_data.records
+        return self.fetch_paginated(job_name=job_name, entity_name=entity_name, path=path, params=params, single=True)
 
     def _fetch_page(self, job_name: str, path: str, params: dict[str, Any]) -> tuple[PageData | None, bool]:
         attempts = 0
         while True:
-            if self.config.delay_seconds:
-                sleep(self.config.delay_seconds)
+            self._check_stop()
             try:
                 return self.client.fetch_page(path, params, use_auth=False), False
+            except CrawlStopped:
+                raise
             except requests.HTTPError as exc:
                 status_code = exc.response.status_code if exc.response is not None else None
                 if status_code in (401, 403) and self.config.token:
                     self.stats[job_name]["auth_retries"] += 1
-                    if self.config.delay_seconds:
-                        sleep(self.config.delay_seconds)
                     try:
                         return self.client.fetch_page(path, params, use_auth=True), True
+                    except CrawlStopped:
+                        raise
                     except Exception as auth_exc:  # noqa: BLE001
                         self._record_error(job_name, int(params.get("pagina", 1) or 1), f"auth retry failed: {auth_exc}", None)
                         return None, True
@@ -510,7 +541,10 @@ class FullCityCrawler:
                     sleep_seconds = retry_after if retry_after is not None else self.config.rate_limit_sleep_seconds
                     self._log(f"  {job_name}: HTTP 429; aguardando {sleep_seconds:.0f}s ({attempts}/{self.config.rate_limit_retries})")
                     if sleep_seconds:
-                        sleep(sleep_seconds)
+                        throttle = getattr(self.client, "throttle", None)
+                        if throttle is not None:
+                            throttle.pause_for(sleep_seconds)
+                        self._sleep(sleep_seconds)
                     continue
                 self._record_error(job_name, int(params.get("pagina", 1) or 1), f"HTTP {status_code}: {exc}", None)
                 return None, False
@@ -518,42 +552,9 @@ class FullCityCrawler:
                 self._record_error(job_name, int(params.get("pagina", 1) or 1), str(exc), None)
                 return None, False
 
-    def _persist_page(self, job_name: str, entity_name: str, page_data: PageData, *, auth_used: bool) -> None:
-        request_params = dict(page_data.params)
-        request_params["_auth_used"] = auth_used
-        self.warehouse.land_page(
-            run_id=self.run_id,
-            job_name=job_name,
-            entity_name=entity_name,
-            page_number=page_data.page_number,
-            request_params_json=stable_json(request_params),
-            response_format=page_data.content_type or "json",
-            http_status=page_data.status_code,
-            payload_json=stable_json(page_data.raw),
-            payload_text=page_data.raw if isinstance(page_data.raw, str) else None,
-            payload_hash=stable_hash(page_data.raw),
-        )
-
-    def _job_has_pages(self, job_name: str) -> bool:
-        if not self.config.bronze_db_path.exists():
-            return False
-        with self.warehouse.connect() as con:
-            return bool(con.execute("select count(*) from bronze_pages where job_name = ?", [job_name]).fetchone()[0])
-
-    def _load_job_records(self, job_name: str) -> list[dict[str, Any]]:
-        records: list[dict[str, Any]] = []
-        if not self.config.bronze_db_path.exists():
-            return records
-        with self.warehouse.connect() as con:
-            rows = con.execute("select payload_json from bronze_pages where job_name = ? order by page_number, fetched_at", [job_name]).fetchall()
-        for (payload_json,) in rows:
-            try:
-                records.extend(extract_records(json.loads(payload_json)))
-            except json.JSONDecodeError:
-                continue
-        return records
-
     def _record_error(self, job_name: str, page_number: int | None, message: str, payload: Any) -> None:
+        if self.config.token:
+            message = message.replace(self.config.token, "[redacted]")
         self.stats[job_name]["errors"] += 1
         payload_json = stable_json(payload) if payload is not None else None
         self.ops_store.record_error(run_id=self.run_id, job_name=job_name, page_number=page_number, message=message, payload_json=payload_json)
@@ -571,9 +572,19 @@ class FullCityCrawler:
 
     def _limited(self, values: list[str], max_count: int) -> list[str]:
         if max_count and len(values) > max_count:
-            self._log(f"  limitando {len(values)} valores a {max_count}")
+            self._record_error("fanout_limit", None, f"fanout truncated: {len(values)} values limited to {max_count}", None)
             return values[:max_count]
         return values
+
+    def _check_stop(self) -> None:
+        if self.control is not None:
+            self.control.check()
+
+    def _sleep(self, seconds: float) -> None:
+        if self.control is not None:
+            self.control.wait(seconds)
+        else:
+            sleep(seconds)
 
     def _log(self, message: str) -> None:
         if self.reporter is not None:

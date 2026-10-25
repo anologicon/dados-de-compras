@@ -1,14 +1,15 @@
 # Project Context
 
 ## What this repo is
-`compras-crawler` is a Python project for crawling public procurement data from **Compras.gov.br** into a **Bronze** DuckDB file.
+`compras-crawler` crawls public procurement data from **Compras.gov.br** into **Bronze** DuckDB files. An optional local web application adds collection management and rebuildable read-only analytical projections.
 
 ## Main goals
 - Fetch public API data from `https://dadosabertos.compras.gov.br`
 - Support JSON and CSV API responses
 - Persist raw fetched pages in a Bronze DuckDB
-- Leave Silver and Gold processing to downstream projects/jobs
+- Keep raw Bronze as the source of truth; web projections are disposable, separate files
 - Resume syncs with checkpoints
+- Offer optional local exploration, a persistent collection queue, and schedules
 
 ## Current architecture
 - `src/compras_crawler/client.py` — HTTP client, pagination, JSON/CSV parsing
@@ -16,7 +17,10 @@
 - `src/compras_crawler/normalize.py` — response record extraction and stable hashing helpers
 - `src/compras_crawler/storage.py` — Bronze DuckDB schema, persistence, and legacy Bronze migration
 - `src/compras_crawler/sync.py` — orchestration runner
-- `src/compras_crawler/cli.py` — CLI entrypoint (`compras-crawler sync`)
+- `src/compras_crawler/cli.py` — CLI entrypoint
+- `src/compras_crawler/crawl_state.py` — atomic full-city page/checkpoint persistence
+- `src/compras_crawler/web/` — optional API, persistent queue/scheduler, isolated workers, analytical projections
+- `frontend/` — React/TypeScript interface and browser tests
 - `docs/API_COMPRAS_GOV.md` — API reference and conventions
 - `context/` — project notes and research
 
@@ -26,7 +30,56 @@
 - CSV endpoints may be selected via `Accept: text/csv`
 - Auth uses bearer token only for jobs/endpoints marked as requiring it (`COMPRAS_GOV_TOKEN`, optionally loaded from `.env`)
 - `--base-url` must use HTTPS; tokened runs are restricted to `https://dadosabertos.compras.gov.br`
-- The crawler stores raw Bronze pages only; Silver/Gold deduping and marts are out of scope here
+- The crawler never replaces raw Bronze with normalized data. Web projections live in their own managed workspace.
+
+## Local web UI (initial implementation)
+
+Install the optional backend and compile the frontend (Node is needed only for build/development):
+```bash
+.venv/bin/pip install -e '.[web,web-test]'
+npm --prefix frontend ci
+npm --prefix frontend run build
+```
+
+Before starting the service, optionally import the existing Florianópolis Bronze. This copies raw pages into a managed municipal database and never overwrites the original:
+```bash
+.venv/bin/compras-crawler web-import \
+  --source-db-path dados_abertos_compras_florianopolis_api_inteira_bronze.duckdb \
+  --municipality-code 4205407 --city-name Florianópolis --state-uf SC
+```
+
+Start manually:
+```bash
+.venv/bin/compras-crawler web
+```
+Open **http://127.0.0.1:8000**. Use `--workspace /path/to/private/workspace` or `--port 8001` if needed. The service binds only to loopback; do not expose it through a public proxy. Imports require the service to be stopped and refuse to overwrite an existing municipal Bronze.
+
+Available now:
+- Official IBGE municipality search by UF and name/code, with automatic read-only code fill and server-side identity validation
+- Publication-cohort panorama, municipality selection, date/object/organization/modality filters
+- Deduplicated purchases, original JSON/provenance, generic entity inspection
+- Streaming CSV/JSON export of the entire filtered population; CSV formula protection
+- Persistent full-city queue, two isolated city workers, global request pacing/cooldown
+- Cooperative stop/resume, recovery, daily/weekly/one-off schedules with explicit timezone
+- Immutable analytical snapshots published at the end; the previous version stays readable
+
+Municipality registration downloads the official IBGE catalog through the backend, caches it in `app.sqlite` for 30 days, and offers **Atualizar catálogo** for explicit refresh. Search ignores case/accents and filters by UF. If IBGE is unavailable, the last valid catalog remains usable with a warning when an update fails; without a saved catalog, new unverified registrations are blocked. Existing municipalities and their collections remain usable.
+
+Schedules run only while this process is alive. Closing the browser does not stop them; stopping the service does. On restart, interrupted work resumes and missed schedule slots are coalesced. Recurrent jobs default to a rolling 90-day window; older history is **not** refreshed automatically. A new collection re-queries the API; resuming an existing collection reuses only its confirmed pages.
+
+The workspace (default `.compras-web/`, ignored by Git) contains `app.sqlite` and `cities/<IBGE>/{bronze.duckdb,ops.sqlite,snapshots/}`. Bronze is retained; projections keep the current and previous versions. New requests stop when free space reaches the configured reserve (`--reserve-gib`, default 5). Tokens are read from the server environment/`.env`, never accepted by the web API.
+
+Imported data is labeled **coverage unverified**. Explicit identity conflicts, unknown publication dates, and unproven municipal membership are excluded from consolidated metrics. Missing monetary values remain unknown, not zero. Estimado, homologado, and contratado are distinct from paid expenditure. The generic explorer shows the latest observed record per identity (ordered by fetch time, with API update time only as a tie-breaker); all original page versions remain in Bronze.
+
+**Not final acceptance:** dedicated supplier/contract/price analyses and full live-module validation are still pending. The strict Brusque acceptance crawl has not yet been executed. See [docs/WEB_PLAN.md](docs/WEB_PLAN.md).
+
+Tests:
+```bash
+.venv/bin/pytest -q
+npm --prefix frontend run build
+npm --prefix frontend run test:e2e
+```
+Browser tests use a temporary synthetic dataset, with workers disabled and no calls to the public API. Install Chromium once with `cd frontend && npx playwright install chromium`.
 
 ## CLI usage
 ```bash
@@ -93,6 +146,7 @@ Useful flags:
 ## Data model
 Bronze DuckDB:
 - `bronze_pages` — raw fetched pages
+- `bronze_crawl_jobs` — full-city generation/completion state; committed atomically with each page
 
 Ops SQLite:
 - `ops_runs` — sync runs and Bronze DB path

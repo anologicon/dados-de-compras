@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 import os
 import shlex
 import sys
@@ -22,6 +23,18 @@ def build_parser() -> argparse.ArgumentParser:
 
     menu_parser = subparsers.add_parser("menu", help="Open an interactive menu for sync options")
     menu_parser.add_argument("--dry-run", action="store_true", help="Only print the generated sync command")
+
+    web_parser = subparsers.add_parser("web", help="Open the local web application (optional web dependencies)")
+    web_parser.add_argument("--workspace", type=Path, default=Path(".compras-web"))
+    web_parser.add_argument("--port", type=int, default=8000)
+    web_parser.add_argument("--reserve-gib", type=float, default=5.0, help="Minimum free disk space before fetching more data")
+
+    import_parser = subparsers.add_parser("web-import", help="Import Bronze into a managed municipal workspace without changing the source")
+    import_parser.add_argument("--workspace", type=Path, default=Path(".compras-web"))
+    import_parser.add_argument("--source-db-path", type=Path, required=True)
+    import_parser.add_argument("--municipality-code", required=True)
+    import_parser.add_argument("--city-name", required=True)
+    import_parser.add_argument("--state-uf", required=True)
 
     sync_parser = subparsers.add_parser("sync", help="Run the Compras.gov.br sync pipeline")
     sync_parser.add_argument(
@@ -83,7 +96,7 @@ def build_parser() -> argparse.ArgumentParser:
     full_city_parser.add_argument("--rate-limit-retries", type=int, default=3, help="Retries for HTTP 429 per page")
     full_city_parser.add_argument("--request-timeout", type=float, default=45.0, help="HTTP request timeout in seconds")
     full_city_parser.add_argument("--request-retries", type=int, default=5, help="Low-level request retry count")
-    full_city_parser.add_argument("--no-resume", action="store_true", help="Do not skip jobs already present in the target Bronze DB")
+    full_city_parser.add_argument("--no-resume", action="store_true", help="Reconsult jobs from page 1 instead of resuming scoped checkpoints")
     full_city_parser.add_argument("--no-reference-catalogs", action="store_true", help="Skip derived material/service catalog endpoint fanout")
     full_city_parser.add_argument("--no-price-research", action="store_true", help="Skip derived price-research endpoint fanout")
     full_city_parser.add_argument("--dry-run", action="store_true", help="Validate and print the planned full-city crawl without calling the API")
@@ -120,6 +133,34 @@ def main(argv: Sequence[str] | None = None) -> int:
     load_dotenv(dotenv_path=Path.cwd() / ".env")
     parser = build_parser()
     args = parser.parse_args(argv)
+
+    if args.command == "web":
+        if not 1 <= args.port <= 65535 or not math.isfinite(args.reserve_gib) or args.reserve_gib < 0:
+            parser.error("port must be 1..65535 and reserve-gib must be non-negative")
+        try:
+            import uvicorn
+            from .web.app import create_app
+        except ModuleNotFoundError:
+            parser.error("Web dependencies missing. Install: pip install -e '.[web]'")
+        app = create_app(args.workspace, port=args.port, reserve_bytes=int(args.reserve_gib * 1024**3))
+        print(f"UI local: http://127.0.0.1:{args.port} · Ctrl-C encerra o serviço e as agendas")
+        uvicorn.run(app, host="127.0.0.1", port=args.port, access_log=False)
+        return 0
+
+    if args.command == "web-import":
+        from .web.seed import import_seed
+        from .web.store import AppStore
+
+        try:
+            if len(args.state_uf) != 2 or not args.state_uf.isalpha():
+                raise ValueError("state-uf must be a two-letter UF")
+            result = import_seed(AppStore(args.workspace), args.source_db_path, args.municipality_code,
+                                 args.city_name, args.state_uf.upper())
+        except (ValueError, FileNotFoundError, FileExistsError, RuntimeError) as exc:
+            parser.error(str(exc))
+        print(f"Importação concluída: {result['bronze_pages']} páginas; {result['coverage']['records']} registros distintos.")
+        print("Original preservado. Cobertura da coleta importada ainda não verificada.")
+        return 0
 
     if args.command == "menu":
         from .menu import InteractiveSyncMenu

@@ -13,3 +13,9 @@ context/
 dist/
 build/
 *.egg-info/
+.compras-web/
+frontend/node_modules/
+*.tsbuildinfo
+src/compras_crawler/web/static/
+test-results/
+playwright-report/

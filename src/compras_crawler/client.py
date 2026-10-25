@@ -8,7 +8,7 @@ from threading import Lock
 from time import monotonic, sleep
 import asyncio
 import csv
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import urljoin, urlparse
 
 import requests
@@ -92,6 +92,7 @@ class ComprasClient:
         rate_limit_sleep_seconds: float = DEFAULT_RATE_LIMIT_SLEEP_SECONDS,
         request_interval_seconds: float = 0.0,
         throttle: RequestThrottle | None = None,
+        sleep_fn: Callable[[float], None] | None = None,
     ):
         validate_base_url(base_url, token=token)
         if timeout <= 0:
@@ -112,6 +113,7 @@ class ComprasClient:
         self.retry_backoff_seconds = retry_backoff_seconds
         self.rate_limit_sleep_seconds = rate_limit_sleep_seconds
         self.throttle = throttle or RequestThrottle(request_interval_seconds)
+        self.sleep_fn = sleep_fn
 
     def _headers(self, accept: str = "json", *, use_auth: bool = False) -> dict[str, str]:
         headers: dict[str, str] = {}
@@ -202,7 +204,7 @@ class ComprasClient:
         if response is not None and response.status_code == 429:
             self.throttle.pause_for(retry_delay)
         if retry_delay > 0:
-            sleep(retry_delay)
+            (self.sleep_fn or sleep)(retry_delay)
 
     def _retry_delay_seconds(self, *, attempt: int, response: requests.Response | None) -> float:
         retry_after = retry_after_seconds(response.headers.get("Retry-After")) if response is not None else None
