@@ -4,7 +4,25 @@ __pycache__/
 .pytest_cache/
 .coverage
 .ruff_cache/
-.pi/
+# Only the supervised evolution interface is shared; other Pi resources stay private.
+.pi/*
+!.pi/agents/
+.pi/agents/*
+!.pi/agents/evolution-product.md
+!.pi/agents/evolution-investigator.md
+!.pi/agents/evolution-implementer.md
+!.pi/agents/evolution-qa.md
+!.pi/agents/evolution-reviewer.md
+!.pi/prompts/
+.pi/prompts/*
+!.pi/prompts/evoluir.md
+!.pi/prompts/evoluir-executar.md
+!.pi/prompts/evoluir-status.md
+!.pi/prompts/evoluir-aceitar.md
+!.pi/workflows/
+.pi/workflows/*
+!.pi/workflows/evolution-discover.js
+!.pi/workflows/evolution-review.js
 context/
 *.duckdb
 *.duckdb-wal
