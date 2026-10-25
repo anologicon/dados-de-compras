@@ -411,3 +411,50 @@ def test_cli_happy_path_is_a_real_process_restart_pilot(workflow, packet, tmp_pa
     state = call("integrate", cycle_id, "--approval", "human separately authorized local ff integration")
     assert state["status"] == "integrated"
     assert call("status", cycle_id)["integration"]["revision"] == git(workflow.repo, "rev-parse", "HEAD")
+
+
+def test_ignored_packet_absent_from_commit_cannot_pass_checks(workflow, packet):
+    (workflow.repo / ".gitignore").write_text("docs/evolution/\n__pycache__/\n")
+    commit(workflow.repo, "ignore packet directory")
+    state = workflow.propose(packet)
+    workflow.approve(state, "synthetic approval", [])
+    workflow.start(state)
+    workflow.assign(state, "native-writer")
+    git(state["worktree"], "commit", "--allow-empty", "-m", "synthetic empty implementation")
+    assert not git(state["worktree"], "ls-files", f"docs/evolution/cycles/{state['id']}/packet.json")
+    with pytest.raises(WorkflowError, match="Pacote versionado ausente"):
+        workflow.check(state)
+    assert state.get("checks") is None
+
+
+def test_integration_uses_frozen_accepted_sha_when_lane_branch_races(workflow, packet, monkeypatch):
+    state = ready(workflow, packet)
+    workflow.accept(state, "operator accepted this exact revision")
+    accepted = state["acceptance"]["revision"]
+    original = module.git
+
+    def race(root, *args):
+        if args[:2] == ("merge", "--ff-only"):
+            assert args[2] == accepted
+            (Path(state["worktree"]) / "unaccepted.txt").write_text("not reviewed")
+            commit(state["worktree"], "unaccepted concurrent commit")
+        return original(root, *args)
+
+    monkeypatch.setattr(module, "git", race)
+    workflow.integrate(state, "operator authorized accepted SHA only")
+    assert git(workflow.repo, "rev-parse", "HEAD") == accepted
+    assert not (workflow.repo / "unaccepted.txt").exists()
+    assert state["status"] == "integrated"
+
+
+def test_check_log_setup_failure_is_blocked_not_falsely_running(workflow, packet):
+    state = started(workflow, packet)
+    (workflow.directory(state["id"]) / "checks").write_text("filesystem obstruction")
+    with pytest.raises(WorkflowError):
+        workflow.check(state)
+    recovered = workflow.load(state["id"])
+    assert recovered["status"] == "blocked"
+    assert recovered["blocked_kind"] == "checks"
+    assert recovered["reason"]
+    assert recovered["checks"]["commands"] == []
+    assert not recovered["checks"]["passed"]

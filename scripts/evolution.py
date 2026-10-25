@@ -203,8 +203,14 @@ class Workflow:
         require(git(lane, "merge-base", "--is-ancestor", state["base"], "HEAD") == "", "Histórico divergiu da base aprovada")
         if committed:
             clean(lane)
-            packet_path = lane / "docs" / "evolution" / "cycles" / state["id"] / "packet.json"
-            require(digest(load_json(packet_path)) == state["packet_hash"], "Pacote versionado diverge da aprovação")
+            relative_packet = f"docs/evolution/cycles/{state['id']}/packet.json"
+            packet_path = lane / relative_packet
+            try:
+                committed_packet = json.loads(git(lane, "show", f"HEAD:{relative_packet}"))
+            except (WorkflowError, ValueError) as exc:
+                raise WorkflowError("Pacote versionado ausente/inválido no commit HEAD") from exc
+            require(digest(committed_packet) == state["packet_hash"] and
+                    digest(load_json(packet_path)) == state["packet_hash"], "Pacote versionado diverge da aprovação")
         return lane
 
     def start(self, state):
@@ -271,8 +277,8 @@ class Workflow:
         env["PYTHONPATH"] = str(lane / "src")
         env.pop("PYTHONHOME", None)
         check_dir = self.directory(state["id"]) / "checks" / uuid.uuid4().hex
-        check_dir.mkdir(parents=True, mode=0o700)
         try:
+            check_dir.mkdir(parents=True, mode=0o700)
             for index, command in enumerate(state["packet"]["checks"]):
                 log = check_dir / f"{index}.log"
                 receipt = dict(name=command["name"], argv=command["argv"], log=str(log), started_at=now())
@@ -364,7 +370,7 @@ class Workflow:
         source_head = git(self.repo, "rev-parse", "HEAD")
         require(source_head in {state["base"], revision}, "Origem avançou; não farei rebase/merge sem nova validação e aprovação")
         if source_head != revision:
-            git(self.repo, "merge", "--ff-only", state["branch"])
+            git(self.repo, "merge", "--ff-only", revision)
         require(git(self.repo, "rev-parse", "HEAD") == revision, "Integração não confirmada")
         state.update(status="integrated", integration=dict(decision=approval, revision=revision, at=now()))
         return self.save(state, "integrated-locally-no-push")
