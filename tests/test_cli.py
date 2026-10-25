@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import builtins
 from pathlib import Path
 
 import duckdb
@@ -15,6 +16,23 @@ class DummyRunner:
     def run(self):
         self.ran = True
         return "run-1"
+
+
+def test_mcp_command_explains_missing_optional_dependency(monkeypatch, capsys):
+    original_import = builtins.__import__
+
+    def without_mcp(name, *args, **kwargs):
+        if name == "mcp" or name.startswith("mcp."):
+            raise ModuleNotFoundError("No module named 'mcp'", name="mcp")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", without_mcp)
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["mcp"])
+    assert exc.value.code == 2
+    captured = capsys.readouterr()
+    assert 'pip install -e ".[mcp]"' in captured.err
+    assert captured.out == ""
 
 
 def test_cli_sync_invokes_runner(monkeypatch, tmp_path: Path):
@@ -336,6 +354,26 @@ def test_cli_full_city_invokes_full_city_crawler(monkeypatch, tmp_path: Path):
     assert captured["config"].state_uf == "SC"
     assert captured["config"].max_purchases == 10
     assert captured["config"].include_reference_catalogs is False
+
+
+def test_cli_commands_coexist_after_merge():
+    parser = cli.build_parser()
+    for command in ("web", "mcp", "menu", "sync", "migrate-bronze"):
+        assert parser.parse_args([command]).command == command
+    assert parser.parse_args(["web-import", "--source-db-path", "bronze.duckdb",
+                              "--municipality-code", "4202909", "--city-name", "Brusque",
+                              "--state-uf", "SC"]).command == "web-import"
+
+
+def test_cli_full_city_loads_dotenv_without_exposing_token(monkeypatch, tmp_path: Path, capsys):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("COMPRAS_GOV_TOKEN", raising=False)
+    (tmp_path / ".env").write_text("COMPRAS_GOV_TOKEN=full-city-dotenv-token\n", encoding="utf-8")
+    assert cli.main(["full-city", "--start-date", "2026-01-01", "--end-date", "2026-01-31",
+                     "--state-uf", "SC", "--municipality-code", "4202909", "--dry-run"]) == 0
+    output = capsys.readouterr().out
+    assert "token configured: True" in output
+    assert "full-city-dotenv-token" not in output
 
 
 def test_cli_full_city_dry_run_does_not_call_api(monkeypatch, tmp_path: Path, capsys):

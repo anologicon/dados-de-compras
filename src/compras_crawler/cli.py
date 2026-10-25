@@ -36,6 +36,11 @@ def build_parser() -> argparse.ArgumentParser:
     import_parser.add_argument("--city-name", required=True)
     import_parser.add_argument("--state-uf", required=True)
 
+    from .mcp_server import add_arguments
+
+    mcp_parser = subparsers.add_parser("mcp", help="Serve read-only project information over MCP stdio")
+    add_arguments(mcp_parser)
+
     sync_parser = subparsers.add_parser("sync", help="Run the Compras.gov.br sync pipeline")
     sync_parser.add_argument(
         "--db-path",
@@ -130,9 +135,15 @@ def build_reporter(args: Any):
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    load_dotenv(dotenv_path=Path.cwd() / ".env")
     parser = build_parser()
     args = parser.parse_args(argv)
+
+    if args.command == "mcp":
+        from .mcp_server import run_from_args
+
+        return run_from_args(args, parser)
+
+    load_dotenv(dotenv_path=Path.cwd() / ".env")
 
     if args.command == "web":
         if not 1 <= args.port <= 65535 or not math.isfinite(args.reserve_gib) or args.reserve_gib < 0:

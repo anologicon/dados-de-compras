@@ -8,6 +8,7 @@ __pycache__/
 context/
 *.duckdb
 *.duckdb-wal
+*.duckdb.wal
 *.sqlite
 *.sqlite-*
 dist/

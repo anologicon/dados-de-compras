@@ -21,6 +21,8 @@
 - `src/compras_crawler/crawl_state.py` — atomic full-city page/checkpoint persistence
 - `src/compras_crawler/web/` — optional API, persistent queue/scheduler, isolated workers, analytical projections
 - `frontend/` — React/TypeScript interface and browser tests
+- `src/compras_crawler/mcp_server.py` — read-only MCP server (`compras-crawler mcp` or `compras-mcp`)
+- `src/compras_crawler/project_access.py` — bounded documentation and database queries
 - `docs/API_COMPRAS_GOV.md` — API reference and conventions
 - `context/` — project notes and research
 
@@ -158,6 +160,24 @@ Legacy migration:
 compras-crawler migrate-bronze --source-db-path compras.duckdb --db-path dados_abertos_compras
 ```
 Use `--overwrite` if the target Bronze file already exists and should be replaced.
+
+## MCP para agentes
+
+Instale o suporte opcional e inicie o servidor local via `stdio`:
+
+```bash
+python3 -m venv .venv
+.venv/bin/python -m pip install -e ".[mcp]"
+.venv/bin/compras-crawler mcp --project-root . \
+  --db-path dados_abertos_compras_bronze.duckdb \
+  --ops-db-path ops/dados_abertos_compras_ops.sqlite
+# A mesma configuração pode ser usada com o executável compras-mcp.
+```
+
+O MCP lê a Bronze atual sem criar tabelas derivadas e mantém compatibilidade
+com bases legadas que já contenham `silver_records`.
+O processo aguarda um cliente MCP; não é uma interface interativa. Veja
+[docs/MCP.md](docs/MCP.md) para configurar agentes, consultar as ferramentas e executar testes.
 
 ## When editing
 - Prefer small, targeted changes
