@@ -1,0 +1,17 @@
+{
+  "title": "Piloto sintético offline: documentar uma soma",
+  "objective": "Adicionar somente uma nota sintética à documentação da lane e validar a soma local de dois inteiros, sem evoluir o produto.",
+  "evidence": ["docs/evolution/README.md: piloto valida encanamento, não compras reais"],
+  "in_scope": ["Criar docs/evolution/synthetic-note.md com a frase '2 + 2 = 4'.", "Commitar o packet.json copiado pelo start e um resumo sintético do trabalho."],
+  "out_of_scope": ["Código da aplicação, WEB_PLAN, bases reais, .env, rede, serviços e dependências", "Push, publicação, limpeza e integração sem autorização separada"],
+  "acceptance": ["docs/evolution/synthetic-note.md contém exatamente a frase '2 + 2 = 4'.", "O check offline da soma termina com código zero sem acessar dados ou rede."],
+  "risks": ["O check aritmético não verifica o arquivo da nota; o revisor precisa lê-lo.", "Este piloto não valida obediência de LLM, segurança de sandbox ou compras reais."],
+  "checks": [
+    {
+      "name": "synthetic-sum",
+      "argv": ["python3", "-I", "-c", "assert 2 + 2 == 4; print('synthetic-only: 2 + 2 = 4')"],
+      "timeout_seconds": 10
+    }
+  ],
+  "permissions": []
+}

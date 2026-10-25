@@ -159,6 +159,15 @@ compras-crawler migrate-bronze --source-db-path compras.duckdb --db-path dados_a
 ```
 Use `--overwrite` if the target Bronze file already exists and should be replaced.
 
+## Evolução supervisionada com Pi
+
+Fluxo local de demanda, backlog, aprovação de escopo, worktree isolada, checks e
+revisão independente; aceite humano e integração fast-forward são decisões
+separadas. Comece por `/evoluir [demanda]` após confiar nos recursos e `/reload`.
+Veja [o guia em português](docs/evolution/README.md), os contratos dos cinco papéis
+e os quatro prompt templates em `.pi`. São instruções cooperativas, não sandbox;
+o piloto é sintético/offline e não valida compras reais ou coleta live.
+
 ## When editing
 - Prefer small, targeted changes
 - Keep sync/idempotency behavior intact
