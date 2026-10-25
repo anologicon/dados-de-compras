@@ -1,0 +1,80 @@
+{
+  "title": "UL-01: contrato lógico revisável de dados e especificação sintética, sem código",
+  "objective": "Produzir, somente em futura lane autorizada, um documento que distinga o armazenamento atual de um contrato proposto de base lógica única compartilhada por CLI/web/MCP, explicite decisões pendentes de Bronze/Silver/Gold e descreva três casos sintéticos não executados. Não implementar runtime, escolher backend ou migrar dados.",
+  "evidence": [
+    "Base inspecionada pelo coordenador: ef8a7fff9cb5f22ac6d0f4f9f2e9b0ed979a23e3; origem limpa antes e após a descoberta. Workflow nativo a6d79ded-3f00-4622-a7a2-339cdd7e82e9, investigador df6f3bc1-5d0b-4afe-8eb8-d12f87451910 e produto 91407866-74a5-40b5-a01c-8dbc4b9b6719: ok=true e relatórios estruturados completed, sem testes executados.",
+    "src/compras_crawler/storage.py:23-37 e src/compras_crawler/sync.py:54-57 derivam Bronze/Ops de prefixo; src/compras_crawler/project_access.py:73-84 deriva outro default de Ops quando recebe um arquivo Bronze. A documentação atual pede argumentos explícitos; a diferença não autoriza mudar defaults.",
+    "src/compras_crawler/web/worker.py:25-55 usa arquivos e lock municipais; src/compras_crawler/web/store.py:53-105 separa o controle web. Esses mecanismos não constituem coordenação de um único DuckDB físico.",
+    "src/compras_crawler/project_access.py:63-69,100-115,191-199,225-255 distingue leitura legada e observações Bronze; src/compras_crawler/web/analytics.py:153-189 seleciona última identidade e compras conciliadas. Contagens de populações diferentes não precisam ser iguais.",
+    "src/compras_crawler/crawl_state.py:60-88 confirma página e progresso full-city na mesma transação; src/compras_crawler/web/store.py:325-340 publica ponteiros de snapshots com lease. Um novo contrato não pode presumir essas garantias para todos os fluxos.",
+    "docs/WEB_PLAN.md:5,9-14,37,65,75 registra plano revisável de Parquet, camadas derivadas fora daquela revisão e isolamento municipal anterior; não é implementação nem autorização para este pacote."
+  ],
+  "in_scope": [
+    "Criar somente docs/evolution/unified-storage-contract.md como documento de proposta, com mapa atual CLI/sync, full-city, web e MCP; evidências arquivo:linha; fatos, hipóteses e propostas rotulados separadamente.",
+    "Descrever Bronze bruto/histórico, Ops do crawler, controle web, snapshots e legado silver_records separadamente. Silver/Gold consolidadas são responsabilidades a definir; records/purchases não serão automaticamente rebatizados. Separar município do recorte de coleta de pertencimento municipal comprovado do registro.",
+    "Registrar alternativas e consequências, sem aprovação arquitetural, para layout físico versus base lógica, backend, identidade portátil de observação, visões por interface, precedência legada e compatibilidade de defaults/checkpoints. Preservação histórica, proveniência, replay versus nova observação e publicação consistente serão invariantes propostas com cobertura atual explicitamente delimitada por fluxo.",
+    "Incluir exatamente um bloco JSON pedagógico, não configuração de runtime, com status=especificacao-nao-executada, permissions=[], current_paths, layer_status, decisions e cases. current_paths conterá os caminhos ilustrativos conferidos pelo check; layer_status distinguirá Bronze atual de Silver/Gold consolidadas a definir, sem negar a tabela legada existente; decisions manterá physical_layout, backend, stable_observation_id, default_views e legacy_precedence como pendente.",
+    "Especificar, sem executar, três casos: duas-observacoes, caminhos-explicitos e contexto-ausente. O primeiro terá observações da entidade pncp_contratacao com identity=sintetica-1, run=a/b, payloads distintos contendo idCompra=sintetica-1, fetched_at ISO determinístico crescente e proveniência de página/execução; expected será bronze_observations=2, snapshot_records=1, selected_run=b. O segundo explicitará Ops sem alterar defaults. O terceiro descreverá ProjectAccess.list_entities com Bronze inexistente, FileNotFoundError e ausência de criação de arquivos; não generalizar esse erro para get_project_info.",
+    "Versionar na futura lane o packet.json copiado pelo controlador em docs/evolution/cycles/<ID-do-ciclo>/packet.json e criar docs/evolution/cycles/<ID-do-ciclo>/summary.md antes dos checks finais. O resumo registrará somente entrega documental, critérios, limitações e que cenários de runtime não foram executados."
+  ],
+  "out_of_scope": [
+    "Qualquer alteração de código, testes executáveis, frontend, dependências, configurações MCP/Pi ou defaults; docs/WEB_PLAN.md e o backlog versionado permanecerão inalterados.",
+    "Criar ou integrar descritor, catálogo, adaptadores, backend ou camadas Silver/Gold de produção; adotar Parquet ou impor um arquivo DuckDB único.",
+    "Abrir, inventariar, copiar, converter ou migrar bases existentes, acessar .compras-web/, .env, credenciais, arquivos pessoais ou segredos; utilizar contagens reais do diagnóstico anterior como prova deste ciclo.",
+    "Executar cenários de runtime, pytest, serviços de produto ou teste, transportes MCP, coleta, rede, instalações ou downloads. Os checks deste pacote apenas leem o documento e inspecionam Git com stdlib já disponível.",
+    "Aprovar ou iniciar candidatos posteriores, executar migração, aceitar entrega ou integrar sem decisões humanas distintas; push, publicação, limpeza e alterações manuais de estado/recibos."
+  ],
+  "acceptance": [
+    "O documento identifica sua natureza de proposta não implementada e permite seguir, com referências arquivo:linha verificáveis na base, argumentos de sync/full-city/web/MCP até Bronze/Ops/controle/snapshot, sem apresentar desenho futuro como comportamento atual.",
+    "O mapa mostra que o prefixo ilustrativo /tmp/sintetico/base deriva /tmp/sintetico/base_bronze.duckdb e /tmp/sintetico/ops/base_ops.sqlite no sync, enquanto ProjectAccess com o Bronze e sem Ops procura /tmp/sintetico/base_bronze_ops.sqlite; explicitar Ops resolve a seleção sem alterar defaults.",
+    "O texto distingue páginas, observações históricas, última identidade e compras conciliadas; explica diferenças legítimas de contagem, a precedência atual de silver_records e a ausência de Silver/Gold consolidadas, sem apagar a existência do legado nem equiparar records/purchases a camadas aprovadas.",
+    "O caso duas-observacoes especifica duas execuções, mesma identidade de negócio, payloads distintos e instantes determinísticos crescentes, com proveniência e expectativas de duas observações Bronze e uma última identidade run=b; diferencia replay de nova observação e não usa hash para eliminar histórico.",
+    "Os casos caminhos-explicitos e contexto-ausente mantêm caminhos meramente ilustrativos, Ops explícito e defaults preservados; o segundo descreve especificamente erro de leitura de Bronze ausente sem criação de arquivos. Os três casos estão marcados como especificações não executadas.",
+    "O registro de decisões mantém layout físico, backend, identidade portátil, visões e precedência legada pendentes, apresenta alternativas/consequências e separa pertencimento municipal do escopo da coleta. Define próximos candidatos e suas dependências sem autorizar migração, implementação ou permissões protegidas.",
+    "O bloco JSON passa no check documental, e o diff commitado contém exatamente unified-storage-contract.md, packet.json e summary.md do próprio ciclo nos caminhos aprovados, sem alterações em outros arquivos. A revisão semântica independente ainda precisa relacionar cada critério às passagens e fontes: o check estrutural não prova comportamento de runtime nem concede aceite."
+  ],
+  "risks": [
+    "Documentação pode cristalizar prematuramente arquitetura ou ser confundida com aprovação; o texto deve manter decisões abertas e não autorizar implementação futura.",
+    "O check automatizado confere consistência de uma especificação, não execução dos casos nem validade de toda a narrativa. Revisão independente integral e evidências por critério continuam obrigatórias.",
+    "Igualar contagens de observações a entidades ou compras perderia semântica; deduplicação por payload_hash poderia apagar ocorrências históricas legítimas.",
+    "Um arquivo DuckDB único introduziria uma decisão de concorrência ainda não testada; Parquet permanece alternativa não avaliada, não solução aprovada.",
+    "Inferências sobre colisão de checkpoints e descarte de CSV têm evidência de código e reproduções propostas, mas não foram reproduzidas em execução nesta fase. Não declarar defeitos observados em bases reais.",
+    "Worktree e perfis somente leitura são controles cooperativos, não sandbox de host/rede; este pacote não atesta isolamento forte nem valida dados de compras."
+  ],
+  "checks": [
+    {
+      "name": "ul01-conteudo-da-especificacao",
+      "argv": [
+        "python3",
+        "-I",
+        "-B",
+        "-c",
+        "from pathlib import Path\nimport json,re\nt=Path('docs/evolution/unified-storage-contract.md').read_text(encoding='utf-8')\nb=re.findall(r'```json\\n(.*?)\\n```',t,re.S)\nassert len(b)==1, 'Esperado um bloco JSON de especificacao'\nd=json.loads(b[0])\nassert d['status']=='especificacao-nao-executada' and d['permissions']==[]\nassert d['current_paths']=={'sync_bronze':'/tmp/sintetico/base_bronze.duckdb','sync_ops':'/tmp/sintetico/ops/base_ops.sqlite','mcp_ops_default':'/tmp/sintetico/base_bronze_ops.sqlite','mcp_ops_explicit':'/tmp/sintetico/ops/base_ops.sqlite','web_bronze':'cities/<IBGE>/bronze.duckdb','web_ops':'cities/<IBGE>/ops.sqlite','web_control':'app.sqlite'}\nassert d['layer_status']=={'Bronze':'atual','Silver':'a-definir','Gold':'a-definir'}\nassert d['decisions']=={k:'pendente' for k in ('physical_layout','backend','stable_observation_id','default_views','legacy_precedence')}\nc=d['cases']\nassert set(c)=={'duas-observacoes','caminhos-explicitos','contexto-ausente'}\no=c['duas-observacoes']['observations']\nassert len(o)==2 and {x['identity'] for x in o}=={'sintetica-1'}\nassert [x['run'] for x in o]==['a','b'] and o[0]['payload']!=o[1]['payload'] and o[0]['fetched_at']<o[1]['fetched_at']\nassert all(x['payload']['idCompra']=='sintetica-1' for x in o)\nassert c['duas-observacoes']['expected']=={'bronze_observations':2,'snapshot_records':1,'selected_run':'b'}\nassert c['caminhos-explicitos']['expected']=={'ops':'/tmp/sintetico/ops/base_ops.sqlite','preserves_defaults':True}\nassert c['contexto-ausente']['expected']=={'exception':'FileNotFoundError','creates_files':False}\nassert all(re.search(re.escape(p)+r':\\d+',t) for p in ('storage.py','project_access.py','web/analytics.py','crawl_state.py','web/store.py'))\nprint('Conteudo estruturado conferido; runtime nao validado; revisao semantica ainda necessaria')"
+      ],
+      "timeout_seconds": 30
+    },
+    {
+      "name": "ul01-diff-documental-sem-erros",
+      "argv": [
+        "git",
+        "diff",
+        "--check",
+        "ef8a7fff9cb5f22ac6d0f4f9f2e9b0ed979a23e3",
+        "HEAD"
+      ],
+      "timeout_seconds": 30
+    },
+    {
+      "name": "ul01-caminhos-exclusivos-do-ciclo",
+      "argv": [
+        "python3",
+        "-I",
+        "-B",
+        "-c",
+        "from pathlib import Path\nimport re,subprocess\ncycle=Path.cwd().name\nassert re.fullmatch(r'evo-[0-9a-f]{12}',cycle), 'Check apenas no cwd da lane do controlador'\nbase='ef8a7fff9cb5f22ac6d0f4f9f2e9b0ed979a23e3'\nr=subprocess.run(['git','diff','--name-only','--no-renames','-z',base,'HEAD'],check=True,capture_output=True)\nchanged=set(filter(None,r.stdout.decode('utf-8').split('\\0')))\nallowed={'docs/evolution/unified-storage-contract.md',f'docs/evolution/cycles/{cycle}/packet.json',f'docs/evolution/cycles/{cycle}/summary.md'}\nassert changed==allowed, f'Diff fora do escopo ou entregavel ausente: {sorted(changed)}'\nprint('Diff restrito aos tres documentos do proprio ciclo; nenhuma validacao de runtime')"
+      ],
+      "timeout_seconds": 30
+    }
+  ],
+  "permissions": []
+}
