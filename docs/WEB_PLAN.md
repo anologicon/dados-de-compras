@@ -1,6 +1,36 @@
 # Pipeline lake local — plano e acompanhamento
 
-## Revisão atual aprovada — ingestão e Bronze
+## Entrega de exploração — primeiro ciclo conectado
+
+Implementada a ficha de compra com itens/resultados PNCP, fornecedor observado e cadastro de referência, por município. Vínculos confirmados, ausentes e ambíguos são explícitos; há paginação, proteção contra mistura de snapshots, CPF mascarado e acesso ao registro/proveniência. Backend anterior mantém resumo/origem disponíveis sem tela branca.
+
+Validação: **241 testes Python e 20 testes Chromium passando**; build concluído e inspeção visual desktop/móvel. No snapshot local de Joinville, a navegação associou 273 itens e 234 resultados às 28 compras conciliadas, sem ambiguidades nesse conjunto. Não houve coleta nova, migração ou reinício do serviço em execução. Isso não equivale a aceite de cobertura da API.
+
+Regras, endpoints e limites: [Explorador conectado](ENTITY_EXPLORER.md). Este ciclo não entrega o restante do roadmap: análises agregadas, comparação de preços, atas/contratos e planejamento continuam posteriores.
+
+## Entrega de UI — panorama editorial e exploração local
+
+Escopo confirmado nesta entrega: visual editorial claro e ampliação do panorama com os dados existentes, preservando a operação atual. Esta solicitação não implementa nem dá aceite à revisão de ingestão descrita abaixo.
+
+Implementado:
+- Nova linguagem visual, hierarquia tipográfica, navegação e layout responsivo, sem fontes/serviços externos.
+- Evolução mensal alternável entre quantidade, estimado e homologado, seleção por toque/teclado e tabela de valores exatos. Campos ausentes, zeros e meses sem registros não são confundidos.
+- Distribuição por modalidade, ranking de órgãos por quantidade/estimado/homologado, preenchimento dos campos e composição PNCP/legado das compras consolidadas.
+- Agregações sobre todo o resultado filtrado. Ranking por valor considera todos os órgãos, não apenas os líderes por volume. Órgãos não identificados não aumentam o indicador de órgãos compradores.
+- Atalhos dos órgãos/modalidades às compras correspondentes, filtros ativos removíveis e exportações CSV/JSON completas também no panorama.
+- Distinção explícita entre preenchimento, cobertura do snapshot e valores efetivamente pagos.
+
+Validação: build TypeScript/Vite, **231 testes Python e 13 testes Chromium passando**; cenários multianuais, ausências/zeros, ranking por valor, filtros/exportação, falha de consulta, layouts de 390/768/1280 px e regressões de cadastro/coletas/agendas. Inspeção visual desktop/móvel com dados sintéticos. Nenhuma nova coleta real ou migração de armazenamento foi executada.
+
+### Correção de compatibilidade com serviço em execução
+
+A primeira validação isolada não cobriu um processo Python iniciado antes do revamp: ele servia os arquivos estáticos novos, mas ainda respondia com o contrato anterior de `/overview`. A leitura de `filtered_range` ausente causava uma exceção React e tela branca.
+
+Corrigido com detecção do contrato da resposta e panorama compatível: indicadores básicos, valores mensais e ranking por quantidade continuam disponíveis. Contagens mensais de campos informados ausentes são sinalizadas como indisponíveis; modalidades, ranking por valor e qualidade detalhada não são fabricados. A interface orienta a reiniciar o serviço após concluir as coletas, sem reinício automático.
+
+Validação adicional: **14 testes Chromium passando**, incluindo resposta anterior, navegação, recorte vazio e transição para o contrato atualizado. Reprodução e correção verificadas em `127.0.0.1:8000`, com os dados locais de Brusque e Florianópolis (1.440 compras), sem erros JavaScript. Nenhuma coleta foi iniciada, parada ou reiniciada nessa verificação.
+
+## Revisão de ingestão aprovada anteriormente — ingestão e Bronze
 
 Esta seção orienta a próxima implementação. As seções posteriores registram a primeira entrega da interface e seus requisitos anteriores. A prioridade agora é operar a ingestão e enxergar a Bronze chegando; modelagem de camadas derivadas fica fora desta revisão.
 

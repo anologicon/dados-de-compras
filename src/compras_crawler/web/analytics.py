@@ -253,16 +253,34 @@ def overview(store: AppStore, city_id: str, filters: dict[str, Any]) -> dict[str
     with connection(store, city_id) as con:
         metrics = rows(con, f"""SELECT count(*) purchases, sum(estimated) estimated, sum(awarded) awarded,
             count(estimated) estimated_known, count(awarded) awarded_known,
-            count(DISTINCT org_name) organizations FROM purchases WHERE {condition}""", params)[0]
+            count(DISTINCT org_name) FILTER (WHERE org_name <> 'Não informado') organizations,
+            count(*) FILTER (WHERE org_name <> 'Não informado') organization_known,
+            count(*) FILTER (WHERE modality <> 'Não informada') modality_known
+            FROM purchases WHERE {condition}""", params)[0]
         monthly = rows(con, f"""SELECT strftime(published_on,'%Y-%m') AS month,count(*) purchases,
-            sum(estimated) estimated,sum(awarded) awarded FROM purchases WHERE {condition} GROUP BY 1 ORDER BY 1""", params)
-        organizations = rows(con, f"""SELECT org_name,count(*) purchases,sum(awarded) awarded
-            FROM purchases WHERE {condition} GROUP BY 1 ORDER BY purchases DESC LIMIT 8""", params)
+            sum(estimated) estimated,sum(awarded) awarded,
+            count(estimated) estimated_known,count(awarded) awarded_known
+            FROM purchases WHERE {condition} GROUP BY 1 ORDER BY 1""", params)
+        # Keep the complete groups: rankings by value must not be restricted to the
+        # leaders by volume. The UI chooses its top N only after selecting a measure.
+        organizations = rows(con, f"""SELECT org_name,count(*) purchases,
+            sum(estimated) estimated,sum(awarded) awarded,
+            count(estimated) estimated_known,count(awarded) awarded_known
+            FROM purchases WHERE {condition} GROUP BY 1 ORDER BY org_name""", params)
+        modality_breakdown = rows(con, f"""SELECT modality,count(*) purchases,
+            sum(estimated) estimated,sum(awarded) awarded,
+            count(estimated) estimated_known,count(awarded) awarded_known
+            FROM purchases WHERE {condition} GROUP BY 1 ORDER BY purchases DESC,modality""", params)
+        sources = rows(con, f"""SELECT family,count(*) purchases FROM purchases
+            WHERE {condition} GROUP BY 1 ORDER BY family""", params)
+        filtered_range = rows(con, f"""SELECT min(published_on) start_date,max(published_on) end_date
+            FROM purchases WHERE {condition}""", params)[0]
         modalities = rows(con, "SELECT DISTINCT modality FROM purchases ORDER BY 1")
         orgs = rows(con, "SELECT DISTINCT org_name FROM purchases ORDER BY 1")
         coverage = json.loads(con.execute("SELECT value FROM snapshot_metadata").fetchone()[0])
         date_range = rows(con, "SELECT min(published_on) start_date,max(published_on) end_date FROM purchases")[0]
     return dict(metrics=metrics, monthly=monthly, organizations=organizations, modalities=modalities,
+                modality_breakdown=modality_breakdown, sources=sources, filtered_range=filtered_range,
                 orgs=orgs, coverage=coverage, date_range=date_range)
 
 

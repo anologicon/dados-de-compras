@@ -11,7 +11,7 @@ from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import analytics
+from . import analytics, exploration
 from .models import CityInput, EnabledInput, RunInput, ScheduleInput
 from .municipalities import CatalogUnavailable, MunicipalityCatalog
 from .runtime import Service
@@ -67,6 +67,10 @@ def create_app(workspace: str | Path = ".compras-web", *, port: int = 8000,
     @app.exception_handler(KeyError)
     async def missing(request, exc):
         return JSONResponse({"detail": str(exc).strip("'")}, status_code=404)
+
+    @app.exception_handler(exploration.SnapshotChanged)
+    async def snapshot_changed(request, exc):
+        return JSONResponse({"detail": str(exc)}, status_code=409)
 
     @app.exception_handler(ValueError)
     async def invalid(request, exc):
@@ -166,6 +170,30 @@ def create_app(workspace: str | Path = ".compras-web", *, port: int = 8000,
                   org_name: str = Query(default="", max_length=300), page: int = Query(default=1, ge=1),
                   page_size: int = Query(default=25, ge=1, le=100)):
         return analytics.purchases(store, city_id, filters(start_date, end_date, q, modality, org_name), page, page_size)
+
+    @app.get("/api/cities/{city_id}/purchase-detail")
+    def purchase_detail(city_id: str, purchase_key: str = Query(min_length=1, max_length=500)):
+        return exploration.purchase_detail(store, city_id, purchase_key)
+
+    @app.get("/api/cities/{city_id}/purchase-items")
+    def purchase_items(city_id: str, purchase_key: str = Query(min_length=1, max_length=500),
+                       snapshot: str = Query(min_length=1, max_length=100),
+                       page: int = Query(default=1, ge=1), page_size: int = Query(default=20, ge=1, le=100)):
+        return exploration.purchase_items(store, city_id, purchase_key, snapshot, page, page_size)
+
+    @app.get("/api/cities/{city_id}/purchase-results")
+    def purchase_results(city_id: str, purchase_key: str = Query(min_length=1, max_length=500),
+                         snapshot: str = Query(min_length=1, max_length=100),
+                         item_record_id: str | None = Query(default=None, pattern=r"^[a-f0-9]{64}$"),
+                         page: int = Query(default=1, ge=1), page_size: int = Query(default=20, ge=1, le=100)):
+        return exploration.purchase_results(store, city_id, purchase_key, snapshot, item_record_id, page, page_size)
+
+    @app.get("/api/cities/{city_id}/supplier-detail")
+    def supplier_detail(city_id: str, purchase_key: str = Query(min_length=1, max_length=500),
+                        snapshot: str = Query(min_length=1, max_length=100),
+                        result_id: str = Query(pattern=r"^[a-f0-9]{64}$"),
+                        page: int = Query(default=1, ge=1), page_size: int = Query(default=10, ge=1, le=100)):
+        return exploration.supplier_detail(store, city_id, purchase_key, snapshot, result_id, page, page_size)
 
     @app.get("/api/cities/{city_id}/entities")
     def entities(city_id: str):

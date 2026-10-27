@@ -119,6 +119,72 @@ def test_snapshot_retains_current_and_previous(projection):
     assert all(p.exists() for p in paths[1:])
 
 
+def test_overview_breakdowns_preserve_missing_zero_and_filtered_population(projection):
+    store, warehouse = projection
+    one = purchase("one", orgaoEntidadeRazaoSocial="Saúde", modalidadeNome="Pregão eletrônico",
+                   valorTotalHomologado=0)
+    one["valorTotalEstimado"] = 0
+    two = purchase("two", orgaoEntidadeRazaoSocial="Educação", modalidadeNome="Dispensa")
+    two["valorTotalEstimado"] = None
+    two["dataPublicacaoPncp"] = "2026-03-10"
+    land(warehouse, "pncp_contratacao", [one, two])
+    land(warehouse, "licitacao", [dict(id_compra="legacy", codigoMunicipioIbge=4202909,
+                                     data_publicacao="2025-12-10", valor_estimado_total=300)])
+    build_snapshot(store, "4202909")
+    data = overview(store, "4202909", {})
+    assert data["metrics"]["purchases"] == 3
+    assert data["metrics"]["estimated_known"] == 2
+    assert data["metrics"]["awarded_known"] == 1
+    assert data["metrics"]["organizations"] == 2  # unknown is not an organization
+    assert data["metrics"]["organization_known"] == data["metrics"]["modality_known"] == 2
+    assert data["sources"] == [{"family": "legacy", "purchases": 1}, {"family": "pncp", "purchases": 2}]
+    assert [r["month"] for r in data["monthly"]] == ["2025-12", "2026-01", "2026-03"]
+    assert data["monthly"][1]["estimated"] == data["monthly"][1]["awarded"] == 0
+    assert data["monthly"][2]["estimated"] is None
+    assert data["monthly"][2]["estimated_known"] == 0
+    assert sum(r["purchases"] for r in data["modality_breakdown"]) == 3
+    assert sum(r["purchases"] for r in data["organizations"]) == 3
+    assert data["date_range"] == data["filtered_range"]
+
+    for selected in ({"modality": "Pregão eletrônico"}, {"org_name": "Saúde"},
+                     {"start_date": "2026-01-01", "end_date": "2026-01-31"}, {"q": "Compra one"}):
+        filtered = overview(store, "4202909", selected)
+        assert filtered["metrics"]["purchases"] == 1
+        assert filtered["metrics"]["estimated"] == filtered["metrics"]["awarded"] == 0
+        assert filtered["modality_breakdown"][0]["modality"] == "Pregão eletrônico"
+        assert filtered["organizations"][0]["org_name"] == "Saúde"
+        assert filtered["sources"] == [{"family": "pncp", "purchases": 1}]
+        assert str(filtered["filtered_range"]["start_date"]) == "2026-01-10"
+        assert str(filtered["date_range"]["start_date"]) == "2025-12-10"
+        assert len(filtered["modalities"]) == 3  # filter choices remain global
+
+
+def test_overview_empty_has_no_fabricated_amounts_or_groups(projection):
+    store, warehouse = projection
+    land(warehouse, "pncp_contratacao", [purchase("one")])
+    build_snapshot(store, "4202909")
+    data = overview(store, "4202909", {"q": "no match"})
+    assert data["metrics"]["purchases"] == 0
+    assert data["metrics"]["estimated"] is data["metrics"]["awarded"] is None
+    assert data["metrics"]["organization_known"] == data["metrics"]["modality_known"] == 0
+    assert data["monthly"] == data["organizations"] == data["modality_breakdown"] == data["sources"] == []
+    assert data["filtered_range"] == {"start_date": None, "end_date": None}
+    assert data["coverage"]["status"] == "unverified"
+
+
+def test_value_ranking_keeps_organizations_outside_volume_top_eight(projection):
+    store, warehouse = projection
+    records = [purchase(f"small-{org}-{i}", orgaoEntidadeRazaoSocial=f"Órgão {org}",
+                        valorTotalHomologado=10) for org in range(9) for i in range(2)]
+    records.append(purchase("large", orgaoEntidadeRazaoSocial="Grande valor", valorTotalHomologado=1000000))
+    land(warehouse, "pncp_contratacao", records)
+    build_snapshot(store, "4202909")
+    data = overview(store, "4202909", {})
+    assert len(data["organizations"]) == 10
+    assert max(data["organizations"], key=lambda r: r["awarded"])["org_name"] == "Grande valor"
+    assert sum(r["purchases"] for r in data["organizations"]) == 19
+
+
 def test_seed_preserves_source_and_refuses_overwrite(tmp_path):
     source = tmp_path / "original.duckdb"
     warehouse = BronzeWarehouse(source)

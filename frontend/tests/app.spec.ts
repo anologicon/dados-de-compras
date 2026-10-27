@@ -23,7 +23,10 @@ test("panorama, filtros, origem e exportação", async ({ page, request }) => {
   await expect(page.locator(".metric").first().locator("strong")).toHaveText(
     "1",
   );
-  await page.getByRole("button", { name: "Compras", exact: true }).click();
+  await page
+    .getByRole("navigation")
+    .getByRole("button", { name: "Compras", exact: true })
+    .click();
   await page
     .getByRole("button", {
       name: "Aquisição de material hospitalar",

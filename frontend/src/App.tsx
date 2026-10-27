@@ -8,21 +8,16 @@ import {
 import {
   Activity,
   ArrowDownToLine,
-  ArrowRight,
   ArrowUpRight,
   Building2,
   CalendarClock,
-  Check,
   ChevronDown,
-  ChevronLeft,
   ChevronRight,
-  CircleHelp,
   Database,
   FileJson,
   Filter,
   Globe2,
   LayoutDashboard,
-  ListFilter,
   LoaderCircle,
   MapPin,
   Pause,
@@ -42,7 +37,7 @@ import {
   type City,
   type Coverage,
   type LogEvent,
-  type Overview,
+  type OverviewResponse,
   type Page,
   type Purchase,
   type RawRecord,
@@ -52,6 +47,10 @@ import {
 } from "./api";
 
 import { MunicipalityForm } from "./MunicipalityForm";
+import { Dashboard } from "./Dashboard";
+import { Pager } from "./Pager";
+import { PurchaseExplorer } from "./PurchaseExplorer";
+import { date, datetime, int, money } from "./format";
 
 type Tab = "overview" | "purchases" | "raw" | "runs" | "schedules";
 const titles: Record<Tab, string> = {
@@ -72,23 +71,6 @@ const statuses: Record<string, string> = {
   finished: "Concluída",
   failed: "Falhou",
 };
-const int = (v: number) => new Intl.NumberFormat("pt-BR").format(v);
-const money = (v: number | null) =>
-  v === null
-    ? "Não informado"
-    : new Intl.NumberFormat("pt-BR", {
-        style: "currency",
-        currency: "BRL",
-        notation: Math.abs(v) >= 1e6 ? "compact" : "standard",
-        maximumFractionDigits: 2,
-      }).format(v);
-const date = (v: string) =>
-  new Date(v.length === 10 ? v + "T12:00:00" : v).toLocaleDateString("pt-BR");
-const datetime = (v: string) =>
-  new Date(v).toLocaleString("pt-BR", {
-    dateStyle: "short",
-    timeStyle: "short",
-  });
 
 function ErrorNotice({ error }: { error: string }) {
   return error ? (
@@ -223,204 +205,6 @@ function Detail({
     </Modal>
   );
 }
-function Pager({
-  page,
-  total,
-  size,
-  setPage,
-}: {
-  page: number;
-  total: number;
-  size: number;
-  setPage: (n: number) => void;
-}) {
-  return (
-    <div className="pagination">
-      <span>
-        {total
-          ? `${int((page - 1) * size + 1)}–${int(Math.min(page * size, total))} de ${int(total)}`
-          : "Nenhum registro"}
-      </span>
-      <div>
-        <button
-          className="icon-button"
-          disabled={page <= 1}
-          onClick={() => setPage(page - 1)}
-          aria-label="Página anterior"
-        >
-          <ChevronLeft size={18} />
-        </button>
-        <span>Página {page}</span>
-        <button
-          className="icon-button"
-          disabled={page * size >= total}
-          onClick={() => setPage(page + 1)}
-          aria-label="Próxima página"
-        >
-          <ChevronRight size={18} />
-        </button>
-      </div>
-    </div>
-  );
-}
-
-function Dashboard({
-  data,
-  openPurchases,
-}: {
-  data: Overview;
-  openPurchases: () => void;
-}) {
-  const m = data.metrics;
-  const max = Math.max(1, ...data.monthly.map((x) => x.purchases));
-  return (
-    <>
-      <div className="metrics">
-        <Metric
-          label="Compras publicadas"
-          value={int(m.purchases)}
-          note="Registros únicos no recorte"
-          icon={<Table2 size={19} />}
-        />
-        <Metric
-          label="Valor estimado"
-          value={money(m.estimated)}
-          note={`${int(m.estimated_known)} compras com valor informado`}
-          icon={<ListFilter size={19} />}
-        />
-        <Metric
-          label="Valor homologado"
-          value={money(m.awarded)}
-          note={`${int(m.awarded_known)} compras com valor informado`}
-          icon={<Check size={19} />}
-          accent
-        />
-        <Metric
-          label="Órgãos compradores"
-          value={int(m.organizations)}
-          note="Unidades localizadas no município"
-          icon={<Building2 size={19} />}
-        />
-      </div>
-      <div className="charts">
-        <section className="panel">
-          <div className="panel-head">
-            <div>
-              <h2>Compras ao longo do tempo</h2>
-              <p>Quantidade por mês de publicação</p>
-            </div>
-            <span className="legend">
-              <i /> Compras
-            </span>
-          </div>
-          {data.monthly.length ? (
-            <div
-              className="chart"
-              role="img"
-              aria-label="Gráfico de compras publicadas por mês"
-            >
-              {data.monthly.map((x) => (
-                <div className="bar-column" key={x.month}>
-                  <span className="bar-value">{int(x.purchases)}</span>
-                  <div className="bar-space">
-                    <div
-                      className="bar"
-                      style={{
-                        height: `${Math.max(2, (x.purchases / max) * 100)}%`,
-                      }}
-                      title={`${x.month}: ${int(x.purchases)} compras`}
-                    />
-                  </div>
-                  <span className="bar-label">
-                    {new Date(x.month + "-15T12:00:00")
-                      .toLocaleDateString("pt-BR", { month: "short" })
-                      .replace(".", "")}
-                    <small>{x.month.slice(0, 4)}</small>
-                  </span>
-                </div>
-              ))}
-            </div>
-          ) : (
-            <Empty title="Sem compras neste recorte">
-              Ajuste os filtros ou confira a cobertura da coleta.
-            </Empty>
-          )}
-        </section>
-        <section className="panel">
-          <div className="panel-head">
-            <div>
-              <h2>Principais órgãos</h2>
-              <p>Por quantidade de compras publicadas</p>
-            </div>
-            <Building2 size={18} className="muted" />
-          </div>
-          <div className="org-list">
-            {data.organizations.length ? (
-              data.organizations.slice(0, 6).map((o, i) => (
-                <div className="org-row" key={o.org_name}>
-                  <span className="org-rank">
-                    {String(i + 1).padStart(2, "0")}
-                  </span>
-                  <div>
-                    <div className="org-label">
-                      <span title={o.org_name}>{o.org_name}</span>
-                      <strong>{int(o.purchases)}</strong>
-                    </div>
-                    <div className="track">
-                      <i
-                        style={{
-                          width: `${(o.purchases / data.organizations[0].purchases) * 100}%`,
-                        }}
-                      />
-                    </div>
-                  </div>
-                </div>
-              ))
-            ) : (
-              <p className="muted">Nenhum órgão no recorte.</p>
-            )}
-          </div>
-          <button className="panel-link" onClick={openPurchases}>
-            Explorar as compras <ArrowRight size={16} />
-          </button>
-        </section>
-      </div>
-      <div className="method-note">
-        <CircleHelp size={18} />
-        <p>
-          <strong>Como ler este panorama</strong> · O recorte é territorial, não
-          apenas da prefeitura. Estimado e homologado são medidas distintas: não
-          devem ser somados e não representam valores efetivamente pagos.
-        </p>
-      </div>
-    </>
-  );
-}
-function Metric({
-  label,
-  value,
-  note,
-  icon,
-  accent,
-}: {
-  label: string;
-  value: string;
-  note: string;
-  icon: ReactNode;
-  accent?: boolean;
-}) {
-  return (
-    <section className={"metric " + (accent ? "accent" : "")}>
-      <div className="metric-label">
-        {label}
-        <span>{icon}</span>
-      </div>
-      <strong>{value}</strong>
-      <p>{note}</p>
-    </section>
-  );
-}
-
 function PurchaseList({ city, query }: { city: City; query: string }) {
   const [page, setPage] = useState(1);
   const [detail, setDetail] = useState<Purchase | null>(null);
@@ -434,7 +218,8 @@ function PurchaseList({ city, query }: { city: City; query: string }) {
         <div>
           <h2>Compras no recorte</h2>
           <p>
-            Conciliação por identificadores explícitos, com prioridade ao PNCP.
+            Abra uma compra para explorar itens, resultados e fornecedores.
+            Vínculos por identificadores explícitos, com prioridade ao PNCP.
           </p>
         </div>
         <div className="actions">
@@ -522,12 +307,13 @@ function PurchaseList({ city, query }: { city: City; query: string }) {
         )
       )}
       {detail && (
-        <Detail
-          title="Detalhes da compra"
-          payload={detail.payload_json}
-          origin={detail.origin_json}
-          close={() => setDetail(null)}
-        />
+        <Modal title="Detalhes da compra" close={() => setDetail(null)} wide>
+          <PurchaseExplorer
+            key={city.id + detail.purchase_key}
+            city={city}
+            purchase={detail}
+          />
+        </Modal>
       )}
     </>
   );
@@ -1229,7 +1015,7 @@ export default function App() {
       }).filter(([, v]) => v),
     ),
   ).toString();
-  const overview = useData<Overview>(
+  const overview = useData<OverviewResponse>(
     city?.has_snapshot ? `/cities/${city.id}/overview?${query}` : null,
     revision + (city?.snapshot_at ? new Date(city.snapshot_at).getTime() : 0),
   );
@@ -1245,6 +1031,9 @@ export default function App() {
   const analyzing = ["overview", "purchases", "raw"].includes(tab);
   return (
     <div className="app-shell">
+      <a className="skip-link" href="#main-content">
+        Pular para o conteúdo
+      </a>
       <aside className="sidebar">
         <a
           className="brand"
@@ -1334,12 +1123,11 @@ export default function App() {
           </div>
           <div className="topbar-right">
             <span className="local-pill">
-              <ShieldCheck size={14} /> Uso local
+              <ShieldCheck size={14} /> Dados locais · leitura com contexto
             </span>
-            <span className="avatar">EU</span>
           </div>
         </header>
-        <main>
+        <main id="main-content" tabIndex={-1}>
           <div className="page-heading">
             <div>
               <span className="eyebrow">DADOS PÚBLICOS, CONTEXTO CLARO</span>
@@ -1351,7 +1139,7 @@ export default function App() {
                 {tab === "overview"
                   ? "Entenda as compras públicas do seu município."
                   : tab === "purchases"
-                    ? "Do panorama ao registro original, sem perder a origem."
+                    ? "Explore compras, itens, resultados e fornecedores, sem perder a origem."
                     : tab === "raw"
                       ? "Inspecione entidades, campos e a origem de cada registro."
                       : tab === "runs"
@@ -1442,6 +1230,8 @@ export default function App() {
                   <button
                     className={"button secondary " + (more ? "selected" : "")}
                     onClick={() => setMore(!more)}
+                    aria-expanded={more}
+                    aria-controls="advanced-filters"
                   >
                     <Filter size={16} />
                     Filtros
@@ -1462,11 +1252,36 @@ export default function App() {
                   )}
                 </div>
               )}
+              {tab !== "raw" && (modality || org) && (
+                <div className="filter-summary" aria-label="Filtros ativos">
+                  {modality && (
+                    <button
+                      className="filter-chip"
+                      onClick={() => setModality("")}
+                      aria-label={`Remover filtro de modalidade: ${modality}`}
+                    >
+                      {modality}
+                      <X size={13} />
+                    </button>
+                  )}
+                  {org && (
+                    <button
+                      className="filter-chip"
+                      onClick={() => setOrg("")}
+                      aria-label={`Remover filtro de órgão: ${org}`}
+                    >
+                      {org}
+                      <X size={13} />
+                    </button>
+                  )}
+                </div>
+              )}
               {more && tab !== "raw" && (
-                <div className="extra-filters">
+                <div className="extra-filters" id="advanced-filters">
                   <label>
                     Modalidade
                     <select
+                      aria-label="Modalidade"
                       value={modality}
                       onChange={(e) => setModality(e.target.value)}
                     >
@@ -1479,6 +1294,7 @@ export default function App() {
                   <label>
                     Órgão
                     <select
+                      aria-label="Órgão"
                       value={org}
                       onChange={(e) => setOrg(e.target.value)}
                     >
@@ -1514,12 +1330,22 @@ export default function App() {
                 overview.data && (
                   <Dashboard
                     data={overview.data}
-                    openPurchases={() => navigate("purchases")}
+                    exportUrl={`/api/cities/${city.id}/export?${query}`}
+                    openPurchases={(filter) => {
+                      if (filter?.org_name) setOrg(filter.org_name);
+                      if (filter?.modality) setModality(filter.modality);
+                      if (filter) setMore(true);
+                      navigate("purchases");
+                    }}
                   />
                 )
               )
             ) : tab === "purchases" ? (
-              <PurchaseList city={city} query={query} />
+              <PurchaseList
+                key={city.id + city.snapshot_at}
+                city={city}
+                query={query}
+              />
             ) : (
               <RawExplorer key={city.id + city.snapshot_at} city={city} />
             )
