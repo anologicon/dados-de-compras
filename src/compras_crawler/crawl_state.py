@@ -58,8 +58,11 @@ class CrawlState:
         return [(page, json.loads(payload), digest) for page, payload, digest in rows]
 
     def commit_page(self, *, key: str, generation: str, job_name: str, entity_name: str,
-                    run_id: str, page: Any, complete: bool, auth_used: bool) -> None:
+                    run_id: str, page: Any, complete: bool, auth_used: bool,
+                    extra_metadata: dict[str, Any] | None = None) -> None:
         params = dict(page.params, _auth_used=auth_used, _crawl_key=key, _crawl_generation=generation)
+        if extra_metadata:
+            params.update(extra_metadata)
         with self.warehouse.connect() as con:
             con.execute("BEGIN TRANSACTION")
             try:

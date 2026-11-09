@@ -1,5 +1,21 @@
 # Pipeline lake local — plano e acompanhamento
 
+## Próximo ciclo planejado — PNCP direto
+
+Escopo confirmado em 2026-10-26: integrar o PNCP oficial além do Compras.gov.br, com **compra → itens → resultados → fornecedor observado**. Novas coletas gerenciadas terão as duas fontes por padrão; execuções e agendas existentes mantêm seu escopo. Piloto planejado: **Brusque/SC, 4202909, 2026-01-01 a 2026-01-31**.
+
+Plano técnico, contratos oficiais, etapas e critérios de aceite: [Integração direta com o PNCP](PNCP_DIRECT_PLAN.md). A implementação deve preservar Bronze e proveniência, conciliar por identificadores explícitos e separar cobertura por fonte. O zero local não deve ser apresentado como inexistência de compras no município.
+
+**Status da implementação (etapas 1–2 concluídas, autorização de 2026-11-08):**
+
+- Contrato de coleta documentado em [API PNCP direto](API_PNCP_DIRECT.md) (host `pncp.gov.br`, rotas públicas de consulta, paginação 50/10, HTTP 204 válido, filhos em arrays, nunca enviar `COMPRAS_GOV_TOKEN`).
+- Cliente e coletor durável implementados em `src/compras_crawler/pncp_direct.py` (`PncpDirectClient`, `PncpDirectCollector`), separados do `FullCityCrawler`: hosts/rotas validados, redirects não seguidos, sem autenticação, parsing por operação, verificação de quantidade por payload, controles incoerentes e páginas repetidas explícitos, retomada por chaves de workspace próprias com página + checkpoint na mesma transação do Bronze, e proveniência `_pncp_*` registrada.
+- Ajuste aditivo em `CrawlState.commit_page` (`extra_metadata`); nenhuma mudança física no esquema Bronze.
+- Validação offline: **27 testes de PNCP direto passando; suíte completa 268 testes Python passando**. Nenhuma coleta real foi executada.
+- Pendente (etapas 3–6 do plano): orquestração municipal com duas fontes sob o mesmo `writer.lock`, integração em web/worker/cli e o piloto de Brusque — este **exige autorização separada**.
+
+**Somente planejamento na entrega anterior:** nenhum coletor novo, alteração de base, migração, reinício ou coleta real foi executado naquele ciclo. O plano não redefine o aceite anterior de todas as áreas do full-city nem entrega a migração Parquet ou a unificação de armazenamento.
+
 ## Entrega de exploração — primeiro ciclo conectado
 
 Implementada a ficha de compra com itens/resultados PNCP, fornecedor observado e cadastro de referência, por município. Vínculos confirmados, ausentes e ambíguos são explícitos; há paginação, proteção contra mistura de snapshots, CPF mascarado e acesso ao registro/proveniência. Backend anterior mantém resumo/origem disponíveis sem tela branca.
