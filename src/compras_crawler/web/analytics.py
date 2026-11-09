@@ -14,6 +14,7 @@ import uuid
 import duckdb
 
 from ..normalize import extract_records, stable_hash, stable_json
+from ..pncp_direct import control_incoherence, nested_first
 from .store import AppStore
 
 PURCHASE_PNCP = {"pncp_contratacao", "pncp_contratacao_id"}
@@ -21,11 +22,47 @@ PURCHASE_LEGACY = {"licitacao", "licitacao_id", "pregao", "pregao_id", "compra_s
 FAMILIES = {
     **{e: "pncp" for e in PURCHASE_PNCP}, **{e: "legacy" for e in PURCHASE_LEGACY},
     "pncp_item_contratacao": "items", "pncp_resultado_item": "results",
+    "pncp_direct_contratacao": "pncp", "pncp_direct_item_contratacao": "items",
+    "pncp_direct_resultado_item": "results",
     "contrato": "contracts", "contrato_id": "contracts",
     "contrato_item": "contract_items", "contrato_item_id": "contract_items",
     "fornecedor": "suppliers", "price_material_detail": "prices", "price_service": "prices",
     "price_service_detail": "prices", "uasg": "units",
 }
+
+
+def item_reference(row: dict[str, Any]) -> tuple[str, Any] | None:
+    """Explicit item number: the Compras.gov.br key first, then the PNCP direct one."""
+    for key in ("numeroItemPncp", "numeroItem"):
+        if row.get(key) is not None and row.get(key) != "":
+            return key, row[key]
+    return None
+
+
+def _expand_nested(row: dict[str, Any]) -> dict[str, Any]:
+    """Flat read view over nested PNCP-direct payloads. The stored payload stays raw.
+
+    Endpoint parentage never becomes a body field: composite identity below is
+    built only from what the body itself says.
+    """
+    view = dict(row)
+    flat = (
+        ("orgaoEntidadeCnpj", (row, ("orgaoEntidade", "cnpj"))),
+        ("orgaoEntidadeRazaoSocial", (row, ("orgaoEntidade", "razaoSocial"))),
+        ("unidadeOrgaoCodigoIbge", (row, ("unidadeOrgao", "codigoIbge"))),
+        ("unidadeOrgaoCodigoUnidade", (row, ("unidadeOrgao", "codigoUnidade"))),
+        ("niFornecedor", (row, ("fornecedor", "niFornecedor"))),
+        ("tipoPessoa", (row, ("fornecedor", "tipoPessoa"))),
+        ("nomeRazaoSocialFornecedor", (row, ("fornecedor", "nomeRazaoSocialFornecedor"))),
+    )
+    for key, args in flat:
+        if view.get(key) in (None, ""):
+            value = nested_first(*args)
+            if key == "nomeRazaoSocialFornecedor" and value in (None, ""):
+                value = nested_first(row, ("fornecedor", "razaoSocial"))
+            if value is not None and value != "":
+                view[key] = value
+    return view
 
 
 def first(row: dict[str, Any], *keys: str) -> Any:
@@ -53,48 +90,64 @@ def day(value: Any) -> str | None:
 
 
 def normalize(entity: str, row: dict[str, Any], origin: dict[str, Any]) -> list[Any]:
+    if isinstance(row, dict) and entity.startswith("pncp_direct_"):
+        view = _expand_nested(row)
+    else:
+        view = row
     family = FAMILIES.get(entity, entity)
-    purchase_id = first(row, "idCompra", "id_compra")
-    control = first(row, "numeroControlePNCP", "numeroControlePNCPCompra", "numeroControlePncpCompra")
-    item_id = first(row, "idCompraItem")
-    supplier = first(row, "niFornecedor", "cnpj", "cpf", "cnpjCpf", "codFornecedor")
+    purchase_id = first(view, "idCompra", "id_compra")
+    control = first(view, "numeroControlePNCP", "numeroControlePNCPCompra", "numeroControlePncpCompra")
+    item_id = first(view, "idCompraItem")
+    reference = item_reference(view)
+    item_number = reference[1] if reference else None
+    supplier = first(view, "niFornecedor", "cnpj", "cpf", "cnpjCpf", "codFornecedor")
     identity: Any = None
     if family in ("pncp", "legacy"):
         identity = purchase_id or (control if family == "pncp" else None)
     elif family == "items":
-        identity = item_id or ([purchase_id or control, row.get("numeroItemPncp")] if (purchase_id or control) and row.get("numeroItemPncp") is not None else None)
+        parent = purchase_id or control
+        identity = item_id or ([str(parent), str(item_number)] if parent is not None and item_number is not None else None)
     elif family == "results":
-        if item_id and row.get("sequencialResultado") is not None:
-            identity = [item_id, row["sequencialResultado"]]
+        sequence = view.get("sequencialResultado")
+        if item_id is not None and sequence is not None:
+            identity = [item_id, sequence]
+        elif (purchase_id is not None or control is not None) and item_number is not None and sequence is not None:
+            # Composite PNCP-direct identity. The body parent control (or the
+            # detail purchase path) is explicit here; provenance never creates identity.
+            identity = [str(purchase_id or control), str(item_number), str(sequence)]
     elif family == "contracts":
-        identity = first(row, "numeroControlePncpContrato", "numeroControlePNCPContrato", "idContrato")
+        identity = first(view, "numeroControlePncpContrato", "numeroControlePNCPContrato", "idContrato")
     elif family == "suppliers":
         identity = supplier
     elif family == "units":
-        identity = first(row, "codigoUasg")
+        identity = first(view, "codigoUasg")
     identity_text = stable_json(identity) if identity is not None else None
-    record_id = stable_hash([family, identity_text or stable_hash(row)])
-    published = day(first(row, "dataPublicacaoPncp", "data_publicacao", "dt_data_edital"))
-    city = first(row, "unidadeOrgaoCodigoIbge", "codigoMunicipioIbge")
-    unit = first(row, "unidadeOrgaoCodigoUnidade", "codigoUasg", "co_uasg", "uasg")
-    updated = str(first(row, "dataAtualizacaoPncp", "dataHoraInclusao") or "")
-    excluded = first(row, "contratacaoExcluida", "contratoExcluido") in (True, "true", "True", 1)
+    record_id = stable_hash([family, identity_text or stable_hash(view)])
+    published = day(first(view, "dataPublicacaoPncp", "data_publicacao", "dt_data_edital"))
+    city = first(view, "unidadeOrgaoCodigoIbge", "codigoMunicipioIbge")
+    unit = first(view, "unidadeOrgaoCodigoUnidade", "codigoUasg", "co_uasg", "uasg")
+    updated = str(first(view, "dataAtualizacaoPncp", "dataHoraInclusao") or "")
+    excluded = first(view, "contratacaoExcluida", "contratoExcluido") in (True, "true", "True", 1)
+    # Control vs body coherence (same rule as the collector: divergence only
+    # counts when the body field is present). Incoherent controls never become
+    # purchases in the projection; the exclusion reason stays explicit.
+    incoherent = family == "pncp" and control is not None and bool(control_incoherence(control, view))
     return [
         record_id, family, entity, identity_text, str(purchase_id) if purchase_id is not None else None,
         str(control) if control is not None else None, str(item_id) if item_id is not None else None,
         str(city) if city is not None else None, str(unit) if unit is not None else None,
-        published, str(first(row, "orgaoEntidadeRazaoSocial", "nomeOrgao", "nome_orgao") or "Não informado"),
-        str(first(row, "modalidadeNome", "nomeModalidadeCompra", "modalidade") or "Não informada"),
-        str(first(row, "objetoCompra", "objeto", "objeto_licitacao", "ds_objeto", "descricaoResumida", "descricao", "nomeRazaoSocial") or ""),
-        number(first(row, "valorTotalEstimado", "valor_estimado_total", "vl_estimado_total")),
-        number(first(row, "valorTotalHomologado", "valor_homologado_total", "vl_homologado_total")),
-        excluded, str(first(row, "codItemCatalogo", "codigoItemCatalogo") or ""),
-        str(first(row, "materialOuServico", "tipoItem") or ""), str(first(row, "unidadeMedida", "unidadeFornecimento") or ""),
+        published, str(first(view, "orgaoEntidadeRazaoSocial", "nomeOrgao", "nome_orgao") or "Não informado"),
+        str(first(view, "modalidadeNome", "nomeModalidadeCompra", "nomeModalidadeContratacao", "modalidade") or "Não informada"),
+        str(first(view, "objetoCompra", "objeto", "objeto_licitacao", "ds_objeto", "descricaoResumida", "descricao", "nomeRazaoSocial") or ""),
+        number(first(view, "valorTotalEstimado", "valor_estimado_total", "vl_estimado_total")),
+        number(first(view, "valorTotalHomologado", "valor_homologado_total", "vl_homologado_total")),
+        excluded, incoherent, str(first(view, "codItemCatalogo", "codigoItemCatalogo") or ""),
+        str(first(view, "materialOuServico", "tipoItem") or ""), str(first(view, "unidadeMedida", "unidadeFornecimento") or ""),
         str(supplier) if supplier is not None else None,
-        str(first(row, "nomeRazaoSocialFornecedor", "nomeFornecedor", "nomeRazaoSocial") or ""),
-        number(first(row, "quantidadeHomologada", "quantidadeResultado", "quantidade")),
-        number(first(row, "valorUnitarioHomologado", "valorUnitarioResultado")),
-        number(first(row, "valorUnitarioEstimado")), number(row.get("valorGlobal")),
+        str(first(view, "nomeRazaoSocialFornecedor", "nomeFornecedor", "nomeRazaoSocial") or ""),
+        number(first(view, "quantidadeHomologada", "quantidadeResultado", "quantidade")),
+        number(first(view, "valorUnitarioHomologado", "valorUnitarioResultado")),
+        number(first(view, "valorUnitarioEstimado")), number(view.get("valorGlobal")),
         updated, origin["fetched_at"], stable_json(origin), stable_json(row),
     ]
 
@@ -120,7 +173,7 @@ def build_snapshot(store: AppStore, city_id: str, *, coverage: dict[str, Any] | 
             target.execute("""CREATE TABLE observations (
                 id TEXT, family TEXT, entity TEXT, identity TEXT, purchase_id TEXT, control TEXT, item_id TEXT,
                 city_code TEXT, unit_code TEXT, published_on DATE, org_name TEXT, modality TEXT, description TEXT,
-                estimated DECIMAL(24,4), awarded DECIMAL(24,4), excluded BOOLEAN,
+                estimated DECIMAL(24,4), awarded DECIMAL(24,4), excluded BOOLEAN, control_incoherent BOOLEAN,
                 catalog_code TEXT, item_type TEXT, unit TEXT, supplier_id TEXT, supplier_name TEXT,
                 quantity DECIMAL(24,4), unit_price DECIMAL(24,4), estimated_unit_price DECIMAL(24,4),
                 contract_value DECIMAL(24,4), updated TEXT, fetched_at TEXT, origin_json TEXT, payload_json TEXT
@@ -171,6 +224,7 @@ def build_snapshot(store: AppStore, city_id: str, *, coverage: dict[str, Any] | 
                     THEN 'id:' || coalesce(r.purchase_id,a.purchase_id) ELSE 'pncp:' || r.control END purchase_key,
                     coalesce(r.city_code,u.city_code) resolved_city,
                     CASE WHEN r.control IN (SELECT control FROM conflicts) THEN 'Identificadores conflitantes'
+                         WHEN r.control_incoherent THEN 'Controle incoerente com o corpo'
                          WHEN r.identity IS NULL THEN 'Sem identificador seguro'
                          WHEN coalesce(r.city_code,u.city_code) IS NULL THEN 'Município não comprovado'
                          WHEN coalesce(r.city_code,u.city_code) <> ? THEN 'Outro município'

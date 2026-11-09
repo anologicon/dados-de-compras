@@ -11,12 +11,25 @@ from typing import Any
 import json
 import re
 
-from .analytics import PURCHASE_COLUMNS, connection, first, number, rows
+from .analytics import PURCHASE_COLUMNS, connection, first, item_reference, number, rows
 from .store import AppStore
 
 
 class SnapshotChanged(ValueError):
     pass
+
+
+def item_number(payload: dict[str, Any]) -> str | None:
+    """Explicit item number from the body, Compras.gov.br or PNCP direct key."""
+    reference = item_reference(payload)
+    return None if reference is None else str(reference[1])
+
+
+def supplier_document(payload: dict[str, Any]) -> tuple[str, str] | None:
+    """Observed supplier identity: nested PNCP fornecedor or flat legacy row."""
+    fornecedor = payload.get("fornecedor") if isinstance(payload.get("fornecedor"), dict) else {}
+    return document(fornecedor.get("niFornecedor") or payload.get("niFornecedor") or payload.get("nuDocumento"),
+                    fornecedor.get("tipoPessoa") or payload.get("tipoPessoa") or "")
 
 
 def link(status: str, reason: str, evidence: list[str] | None = None) -> dict[str, Any]:
@@ -93,8 +106,9 @@ class PurchaseGraph:
             self.control_owners[row["control"]].add(row["purchase_key"])
         params: list[Any] = []
         condition = self._parent_condition(params)
-        self.items = rows(con, f"""SELECT * FROM records WHERE family='items' AND ({condition})
-            ORDER BY try_cast(json_extract_string(payload_json,'$.numeroItemPncp') AS BIGINT) NULLS LAST,id""", params)
+        self.items = rows(con, f"""SELECT * FROM records WHERE family='items' AND ({condition} OR {self._provenance_condition(params)})
+            ORDER BY try_cast(coalesce(json_extract_string(payload_json,'$.numeroItemPncp'),
+                                        json_extract_string(payload_json,'$.numeroItem')) AS BIGINT) NULLS LAST,id""", params)
         self.item_links = {r["id"]: self.parent_link(r) for r in self.items}
         item_ids = {r["item_id"] for r in self.items if r["item_id"] is not None}
         # Check the item identifier across the snapshot, not only in the current
@@ -108,20 +122,34 @@ class PurchaseGraph:
             self.by_item_id[item["item_id"]].append(item)
         for item in self.items:
             if self.item_links[item["id"]]["status"] == "confirmed":
-                item_number = text(json.loads(item["payload_json"]).get("numeroItemPncp"))
-                if item_number is not None:
-                    self.by_number[item_number].append(item)
+                number = item_number(json.loads(item["payload_json"]))
+                if number is not None:
+                    self.by_number[number].append(item)
         result_params: list[Any] = []
         parent_condition = self._parent_condition(result_params)
         item_condition = _matching("item_id", item_ids, result_params)
         self.results = rows(con, f"""SELECT * FROM records WHERE family='results'
-            AND ({parent_condition} OR {item_condition})
-            ORDER BY try_cast(json_extract_string(payload_json,'$.numeroItemPncp') AS BIGINT) NULLS LAST,
+            AND ({parent_condition} OR {item_condition} OR {self._provenance_condition(result_params)})
+            ORDER BY try_cast(coalesce(json_extract_string(payload_json,'$.numeroItemPncp'),
+                                       json_extract_string(payload_json,'$.numeroItem')) AS BIGINT) NULLS LAST,
                      try_cast(json_extract_string(payload_json,'$.sequencialResultado') AS BIGINT) NULLS LAST,id""", result_params)
         self.result_links = {r["id"]: self.resolve_result(r) for r in self.results}
 
     def _parent_condition(self, params: list[Any]) -> str:
         return _matching("purchase_id", self.purchase_ids, params) + " OR " + _matching("control", self.controls, params)
+
+    def _provenance_condition(self, params: list[Any]) -> str:
+        """Candidate selection by requested path, recorded in the page provenience."""
+        return _matching("coalesce(json_extract_string(origin_json,'$.request_params._pncp_parent_control'),'')",
+                         self.controls, params)
+
+    def provenance(self, row: dict[str, Any]) -> dict[str, Any]:
+        try:
+            origin = json.loads(row["origin_json"])
+        except (ValueError, TypeError):
+            return {}
+        params = origin.get("request_params")
+        return params if isinstance(params, dict) else {}
 
     def parent_link(self, row: dict[str, Any]) -> dict[str, Any]:
         evidence = []
@@ -129,6 +157,12 @@ class PurchaseGraph:
             evidence.append("idCompra")
         if row["control"] in self.controls:
             evidence.append("numeroControlePNCPCompra")
+        if not evidence:
+            # Endpoint-derived parentage: provenience evidence, never a payload
+            # field, and always subject to the same contradiction checks.
+            parent_control = text(self.provenance(row).get("_pncp_parent_control"))
+            if parent_control is not None and parent_control in self.controls:
+                evidence.append(f"proveniência do endpoint (compra {parent_control})")
         if not evidence:
             return link("missing", "Sem identificador explícito que vincule o registro a esta compra.")
         contradictions = self.contradictions(row)
@@ -147,21 +181,23 @@ class PurchaseGraph:
                 reasons.append("controle PNCP divergente")
             if self.control_owners[row["control"]] - {self.key}:
                 reasons.append("controle PNCP associado a outra compra ou a identificadores conflitantes")
+        provenance_parent = text(self.provenance(row).get("_pncp_parent_control"))
+        if provenance_parent is not None and self.controls and provenance_parent not in self.controls:
+            reasons.append("caminho requisitado aponta para outra compra")
         return reasons
 
     def resolve_result(self, row: dict[str, Any]) -> dict[str, Any]:
         parent = self.parent_link(row)
         payload = json.loads(row["payload_json"])
+        reference = item_reference(payload)
         candidates = []
         evidence = []
         if row["item_id"] is not None:
             candidates = self.by_item_id[row["item_id"]]
             evidence = ["idCompraItem"]
-        elif parent["status"] == "confirmed":
-            item_number = text(payload.get("numeroItemPncp"))
-            if item_number is not None:
-                candidates = self.by_number[item_number]
-                evidence = parent["evidence"] + ["numeroItemPncp"]
+        elif parent["status"] == "confirmed" and reference is not None:
+            candidates = self.by_number[str(reference[1])]
+            evidence = parent["evidence"] + [reference[0]]
         related = None
         item_link = link("missing", "Nenhum item com identificadores compatíveis foi encontrado neste snapshot.")
         if candidates:
@@ -171,9 +207,10 @@ class PurchaseGraph:
                 candidate = candidates[0]
                 # An explicit foreign parent must not be overridden by item ID.
                 conflicting = bool(self.contradictions(row))
-                result_number = text(payload.get("numeroItemPncp"))
-                candidate_number = text(json.loads(candidate["payload_json"]).get("numeroItemPncp"))
-                if conflicting or (result_number is not None and candidate_number is not None and result_number != candidate_number):
+                candidate_reference = item_reference(json.loads(candidate["payload_json"]))
+                number_conflict = (reference is not None and candidate_reference is not None
+                                   and str(reference[1]) != str(candidate_reference[1]))
+                if conflicting or number_conflict:
                     item_link = link("ambiguous", "O identificador do item conflita com a compra ou com o número do item.", evidence)
                     parent = link("ambiguous", "Resultado com identificadores contraditórios; associação não confirmada.", evidence)
                 else:
@@ -192,7 +229,7 @@ class PurchaseGraph:
         confirmed = sum(1 for relation in self.result_links.values() if relation["item_record_id"] == row["id"]
                         and relation["purchase_link"]["status"] == "confirmed")
         return dict(id=row["id"], identity_status="identified" if row["identity"] is not None else "unverified",
-                    description=row["description"], item_number=text(payload.get("numeroItemPncp")),
+                    description=row["description"], item_number=item_number(payload),
                     catalog_code=row["catalog_code"] or None, item_type=row["item_type"] or None,
                     unit=row["unit"] or None, quantity=number(payload.get("quantidade")),
                     estimated_unit_price=row["estimated_unit_price"], status=text(payload.get("situacaoCompraItemNome")),
@@ -202,12 +239,12 @@ class PurchaseGraph:
     def public_result(self, row: dict[str, Any]) -> dict[str, Any]:
         payload = json.loads(row["payload_json"])
         relation = self.result_links[row["id"]]
-        doc = document(payload.get("niFornecedor"), payload.get("tipoPessoa"))
+        doc = supplier_document(payload)
         return dict(id=row["id"], identity_status="identified" if row["identity"] is not None else "unverified",
-                    **relation, item_number=text(payload.get("numeroItemPncp")),
+                    **relation, item_number=item_number(payload),
                     sequence=text(payload.get("sequencialResultado")),
                     status=text(payload.get("situacaoCompraItemResultadoNome")),
-                    cancelled=bool(payload.get("dataCancelamentoPncp")) or str(payload.get("situacaoCompraItemResultadoNome", "")).casefold() in ("cancelado", "cancelada"), quantity=row["quantity"],
+                    cancelled=bool(payload.get("dataCancelamentoPncp") or payload.get("dataCancelamento")) or str(payload.get("situacaoCompraItemResultadoNome", "")).casefold() in ("cancelado", "cancelada"), quantity=row["quantity"],
                     unit_price=row["unit_price"], total=number(payload.get("valorTotalHomologado")),
                     supplier=dict(name=row["supplier_name"] or "Fornecedor não informado", identifier=display_document(doc),
                                   kind=doc[0] if doc else None,
@@ -265,7 +302,7 @@ def supplier_detail(store: AppStore, city_id: str, purchase_key: str, snapshot: 
         if graph.result_links[result_id]["purchase_link"]["status"] != "confirmed":
             raise ValueError("O vínculo do resultado com esta compra não está confirmado.")
         payload = json.loads(result["payload_json"])
-        doc = document(payload.get("niFornecedor"), payload.get("tipoPessoa"))
+        doc = supplier_document(payload)
         if not doc:
             raise ValueError("O documento do fornecedor não permite uma conciliação cadastral segura.")
         # Read only the supplier reference family in the same published snapshot.

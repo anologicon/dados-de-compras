@@ -14,11 +14,41 @@ CITY = "4202909"
 KEY = "id:purchase-1"
 
 
-def land(warehouse, entity, records, run="first"):
+def land(warehouse, entity, records, run="first", request_params=None):
     payload = {"resultado": records, "totalPaginas": 1}
     warehouse.land_page(run_id=run, job_name=entity, entity_name=entity, page_number=1,
-                        request_params_json="{}", response_format="json", http_status=200,
+                        request_params_json=stable_json(request_params or {}), response_format="json", http_status=200,
                         payload_json=stable_json(payload), payload_text=None, payload_hash=stable_hash(payload))
+
+
+def direct_land(warehouse, entity, records, run="direct", request_params=None):
+    provenance = {"_pncp_source": "pncp_direct", **(request_params or {})}
+    land(warehouse, entity, records, run=run, request_params=provenance)
+
+
+DIRECT_CONTROL = "12345678000100-1-000123/2026"
+DIRECT_KEY = f"pncp:{DIRECT_CONTROL}"
+
+
+def direct_buy(**extra):
+    body = dict(numeroControlePNCP=DIRECT_CONTROL, anoCompra=2026, sequencialCompra=123,
+                orgaoEntidade=dict(cnpj="12345678000100", razaoSocial="Órgão daCompra"),
+                unidadeOrgao=dict(codigoIbge=4202909, codigoUnidade="654321"),
+                dataPublicacaoPncp="2026-01-12", objetoCompra="Aquisição direta de luvas",
+                valorTotalEstimado=0)
+    body.update(extra)
+    return body
+
+
+def direct_item(number=1, **extra):
+    return dict(numeroItem=number, descricao="Luva hospitalar direta", temResultado=True,
+                valorUnitarioEstimado=0, **extra)
+
+
+def direct_result(number=1, sequence=1, **extra):
+    return dict(numeroItem=number, sequencialResultado=sequence,
+                fornecedor=dict(tipoPessoa="PJ", niFornecedor="12345678000199", razaoSocial="Fornecedor direto"),
+                quantidadeHomologada=0, valorUnitarioHomologado=0, valorTotalHomologado=0, **extra)
 
 
 def buy(key="purchase-1", control="control-1", **extra):
@@ -53,6 +83,27 @@ def graph(tmp_path):
 def publish(store):
     build_snapshot(store, CITY)
     return purchase_detail(store, CITY, KEY)["snapshot"]
+
+
+def make_direct_graph(tmp_path, landings):
+    store = AppStore(tmp_path / "workspace")
+    store.init_schema()
+    store.add_city(CITY, "Brusque", "SC")
+    warehouse = BronzeWarehouse(store.city_dir(CITY) / "bronze.duckdb")
+    warehouse.init_schema()
+    for entity, records, params in landings:
+        direct_land(warehouse, entity, records, request_params=params)
+    return store, warehouse
+
+
+@pytest.fixture
+def direct_graph(tmp_path):
+    return make_direct_graph(tmp_path, [("pncp_direct_contratacao", [direct_buy()], None)])
+
+
+def direct_publish(store):
+    build_snapshot(store, CITY)
+    return purchase_detail(store, CITY, DIRECT_KEY)["snapshot"]
 
 
 def test_connected_purchase_item_result_supplier_uses_existing_snapshot_only(graph):
@@ -137,7 +188,9 @@ def test_composite_item_reference_requires_unique_number_and_preserves_orphans(g
     awards = {r["sequence"]: r for r in purchase_results(store, CITY, KEY, version)["items"]}
     assert awards["1"]["item_link"]["status"] == "ambiguous"
     assert awards["2"]["item_link"]["status"] == "confirmed"
-    assert awards["2"]["identity_status"] == "unverified"
+    # Composição da e3a: controle/ID no corpo + numeroItemPncp + sequencial
+    # também provam identidade; ficar sem idCompraItem não descarta o vínculo.
+    assert awards["2"]["identity_status"] == "identified"
     assert "numeroItemPncp" in awards["2"]["item_link"]["evidence"]
     assert awards["3"]["item_link"]["status"] == "missing"
     assert purchase_detail(store, CITY, KEY)["summary"]["results_without_item"] == 2
@@ -252,3 +305,76 @@ def test_exploration_http_validation_and_snapshot_conflict(graph):
         assert client.get(base + "/supplier-detail", params=dict(params, result_id="f" * 64)).status_code == 404
         assert client.get(base + "/purchase-detail", params=dict(purchase_key="unknown")).status_code == 404
         assert client.get(base + "/purchase-detail", params=dict(purchase_key=KEY), headers={"Host": "other:8000"}).status_code == 400
+
+
+def test_direct_pncp_navigates_without_comprasgov_identifiers(direct_graph):
+    store, warehouse = direct_graph
+    direct_land(warehouse, "pncp_direct_item_contratacao", [direct_item()],
+                request_params={"_pncp_parent_control": DIRECT_CONTROL})
+    direct_land(warehouse, "pncp_direct_resultado_item", [direct_result()],
+                request_params={"_pncp_parent_control": DIRECT_CONTROL, "_pncp_parent_item": 1})
+    version = direct_publish(store)
+    detail = purchase_detail(store, CITY, DIRECT_KEY)
+    assert detail["purchase"]["purchase_key"] == DIRECT_KEY
+    assert detail["purchase"]["family"] == "pncp"
+    assert detail["summary"] == dict(item_records=1, result_records=1, confirmed_items=1,
+                                     ambiguous_items=0, confirmed_results=1, ambiguous_results=0, results_without_item=0)
+    child = purchase_items(store, CITY, DIRECT_KEY, version)["items"][0]
+    # Filhos sem controle/id no corpo ficam explicitamente sem identidade estável;
+    # o vínculo é provado pelo caminho requisitado, não por campo fabricado.
+    assert child["identity_status"] == "unverified"
+    assert child["item_number"] == "1"
+    assert child["purchase_link"]["status"] == "confirmed"
+    assert child["purchase_link"]["evidence"] == [f"proveniência do endpoint (compra {DIRECT_CONTROL})"]
+    award = purchase_results(store, CITY, DIRECT_KEY, version)["items"][0]
+    assert award["identity_status"] == "unverified"
+    assert award["sequence"] == "1"
+    assert award["purchase_link"]["status"] == "confirmed"
+    assert award["item_link"]["status"] == "confirmed"
+    assert award["item_link"]["evidence"] == [f"proveniência do endpoint (compra {DIRECT_CONTROL})", "numeroItem"]
+    assert award["item_record_id"] == child["id"]
+    assert award["supplier"]["name"] == "Fornecedor direto"
+    assert award["supplier"]["kind"] == "cnpj" and award["supplier"]["can_open"]
+    assert award["supplier"]["identifier"] == "12.345.678/0001-99"
+    supplier = supplier_detail(store, CITY, DIRECT_KEY, version, award["id"])
+    assert supplier["registration_status"] == "missing"
+    assert json.loads(award["origin_json"])["entity"] == "pncp_direct_resultado_item"
+
+
+def test_direct_endpoint_parentage_does_not_override_contradictory_body(direct_graph):
+    store, warehouse = direct_graph
+    conflicting = direct_item(numeroControlePNCPCompra="other-control")
+    direct_land(warehouse, "pncp_direct_item_contratacao", [conflicting],
+                request_params={"_pncp_parent_control": DIRECT_CONTROL})
+    direct_land(warehouse, "pncp_direct_resultado_item", [direct_result()],
+                request_params={"_pncp_parent_control": DIRECT_CONTROL, "_pncp_parent_item": 1})
+    version = direct_publish(store)
+    child = purchase_items(store, CITY, DIRECT_KEY, version)["items"][0]
+    assert child["purchase_link"]["status"] == "ambiguous"
+    assert "controle PNCP divergente" in child["purchase_link"]["reason"]
+    payload = json.loads(child["payload_json"])
+    assert payload["numeroControlePNCPCompra"] == "other-control"
+    assert "idCompra" not in payload and "idCompraItem" not in payload
+    origin = json.loads(child["origin_json"])
+    assert origin["request_params"]["_pncp_parent_control"] == DIRECT_CONTROL
+    with pytest.raises(ValueError, match="não está confirmado"):
+        purchase_results(store, CITY, DIRECT_KEY, version, child["id"])
+    awards = purchase_results(store, CITY, DIRECT_KEY, version)["items"]
+    assert awards[0]["purchase_link"]["status"] == "confirmed"  # resultado sem corpo contraditório
+    assert awards[0]["item_record_id"] is None
+    summary = purchase_detail(store, CITY, DIRECT_KEY)["summary"]
+    assert summary == dict(item_records=1, result_records=1, confirmed_items=0,
+                           ambiguous_items=1, confirmed_results=1, ambiguous_results=0, results_without_item=1)
+
+
+def test_incoherent_direct_control_is_excluded_from_purchases(tmp_path):
+    divergent = direct_buy(orgaoEntidade=dict(cnpj="99999999000199", razaoSocial="Órgão divergente"))
+    store, warehouse = make_direct_graph(tmp_path, [("pncp_direct_contratacao", [divergent], None)])
+    build_snapshot(store, CITY)
+    with pytest.raises(KeyError, match="não encontrada"):
+        purchase_detail(store, CITY, DIRECT_KEY)
+    with connection(store, CITY) as con:
+        candidate = con.execute("SELECT exclusion_reason FROM purchase_candidates").fetchone()
+        nested = con.execute("SELECT payload_json FROM records").fetchone()[0]
+    assert candidate[0] == "Controle incoerente com o corpo"
+    assert json.loads(nested)["orgaoEntidade"]["cnpj"] == "99999999000199"
