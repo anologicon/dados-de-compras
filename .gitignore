@@ -1,4 +1,6 @@
 .env
+agent_state.json
+task_board.json
 .venv/
 __pycache__/
 .pytest_cache/
