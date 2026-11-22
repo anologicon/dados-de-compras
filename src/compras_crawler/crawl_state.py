@@ -19,6 +19,10 @@ class CrawlStopped(Exception):
     """Cooperative stop, not an endpoint failure."""
 
 
+class CrawlDiskReserve(OSError):
+    """Workspace capacity reached; do not continue to a different source."""
+
+
 class CrawlState:
     def __init__(self, warehouse: BronzeWarehouse):
         self.warehouse = warehouse

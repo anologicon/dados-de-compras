@@ -126,10 +126,42 @@ function CoverageNotice({ coverage }: { coverage: Coverage }) {
           {coverage.unreconciled > 0 &&
             `${int(coverage.unreconciled)} registros sem conciliação segura estão fora dos indicadores.`}
         </span>
+        {coverage.exclusion_reasons && Object.keys(coverage.exclusion_reasons).length > 0 && (
+          <details>
+            <summary>Motivos de exclusão da conciliação</summary>
+            <ul>{Object.entries(coverage.exclusion_reasons).map(([reason, count]) => (
+              <li key={reason}>{reason}: {int(count)} registros</li>
+            ))}</ul>
+          </details>
+        )}
+        {coverage.sources && (
+          <details>
+            <summary>Cobertura por fonte{coverage.start_date && coverage.end_date &&
+              ` · ${date(coverage.start_date)} a ${date(coverage.end_date)}`}</summary>
+            {Object.entries(coverage.sources).map(([source, result]) => (
+              <div key={source}>
+                <strong>{source === "pncp_direct" ? "PNCP direto" : "Compras.gov.br"}</strong>{" "}
+                {coverageState[result.status] || result.status}
+                {result.stages && <ul>{Object.entries(result.stages).map(([stage, state]) => (
+                  <li key={stage}>{stageLabels[stage] || stage}: {coverageState[state.status] || state.status}</li>
+                ))}</ul>}
+              </div>
+            ))}
+            <p>As contagens por fonte podem se sobrepor. Não representam o total conciliado.</p>
+            {coverage.prior_snapshot && coverage.status === "partial" &&
+              <p>Dados de coletas anteriores podem continuar no snapshot.</p>}
+          </details>
+        )}
       </div>
     </div>
   );
 }
+const stageLabels: Record<string, string> = { listing: "Listagem", items: "Itens", results: "Resultados" };
+const coverageState: Record<string, string> = {
+  complete: "Concluída", partial: "Parcial", empty: "Vazio confirmado neste recorte",
+  unavailable: "Fonte indisponível", error: "Erro ou truncamento",
+  not_collected: "Não coletado", not_selected: "Não selecionada",
+};
 function Modal({
   title,
   children,
@@ -745,14 +777,35 @@ function NewCity({
     </Modal>
   );
 }
+function CollectionSourceFields({ supported }: { supported: boolean }) {
+  if (!supported) return <p className="muted">PNCP direto não está disponível neste backend.</p>;
+  return (
+    <fieldset>
+      <legend>Fontes da coleta</legend>
+      <label><input name="collection_sources" type="checkbox" value="comprasgov" defaultChecked /> Compras.gov.br</label>
+      <label><input name="collection_sources" type="checkbox" value="pncp_direct" defaultChecked /> PNCP direto</label>
+    </fieldset>
+  );
+}
+
+function collectionForm(form: FormData, supported: boolean): Record<string, unknown> {
+  const values: Record<string, unknown> = Object.fromEntries(form);
+  if (supported) values.collection_sources = form.getAll("collection_sources");
+  return values;
+}
+
 function RunForm({
   cities,
   selected,
+  sourcesSupported,
+  sourcesLoading,
   close,
   done,
 }: {
   cities: City[];
   selected: string;
+  sourcesSupported: boolean;
+  sourcesLoading: boolean;
   close: () => void;
   done: () => void;
 }) {
@@ -761,7 +814,7 @@ function RunForm({
   const submit = async (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     setBusy(true);
-    const values = Object.fromEntries(new FormData(e.currentTarget));
+    const values = collectionForm(new FormData(e.currentTarget), sourcesSupported);
     try {
       await api("/runs", "POST", values);
       done();
@@ -813,6 +866,7 @@ function RunForm({
             />
           </label>
         </div>
+        {!sourcesLoading && <CollectionSourceFields supported={sourcesSupported} />}
         <div className="notice info">
           <ShieldCheck size={19} />
           <span>
@@ -825,7 +879,7 @@ function RunForm({
           <button type="button" className="button secondary" onClick={close}>
             Cancelar
           </button>
-          <button className="button primary" disabled={busy || !cities.length}>
+          <button className="button primary" disabled={busy || !cities.length || sourcesLoading}>
             {busy ? (
               <LoaderCircle size={16} className="spin" />
             ) : (
@@ -841,11 +895,15 @@ function RunForm({
 function ScheduleForm({
   cities,
   selected,
+  sourcesSupported,
+  sourcesLoading,
   close,
   done,
 }: {
   cities: City[];
   selected: string;
+  sourcesSupported: boolean;
+  sourcesLoading: boolean;
   close: () => void;
   done: () => void;
 }) {
@@ -856,7 +914,7 @@ function ScheduleForm({
     e.preventDefault();
     setBusy(true);
     const f = new FormData(e.currentTarget);
-    const values: Record<string, unknown> = Object.fromEntries(f);
+    const values = collectionForm(f, sourcesSupported);
     values.window_days = Number(f.get("window_days"));
     if (frequency === "weekly") values.weekday = Number(f.get("weekday"));
     if (frequency === "once") {
@@ -972,12 +1030,13 @@ function ScheduleForm({
           Alterações anteriores à janela não serão reconsultadas
           automaticamente. Agendas dependem do serviço local ativo.
         </p>
+        {!sourcesLoading && <CollectionSourceFields supported={sourcesSupported} />}
         <ErrorNotice error={error} />
         <div className="form-actions">
           <button type="button" className="button secondary" onClick={close}>
             Cancelar
           </button>
-          <button className="button primary" disabled={busy || !cities.length}>
+          <button className="button primary" disabled={busy || !cities.length || sourcesLoading}>
             {busy && <LoaderCircle size={16} className="spin" />}Criar agenda
           </button>
         </div>
@@ -1384,6 +1443,8 @@ export default function App() {
         <RunForm
           cities={cities.data || []}
           selected={city?.id || ""}
+          sourcesSupported={service.data?.capabilities?.collection_sources?.includes("pncp_direct") ?? false}
+          sourcesLoading={service.loading}
           close={() => setDialog(null)}
           done={() => {
             setDialog(null);
@@ -1396,6 +1457,8 @@ export default function App() {
         <ScheduleForm
           cities={cities.data || []}
           selected={city?.id || ""}
+          sourcesSupported={service.data?.capabilities?.collection_sources?.includes("pncp_direct") ?? false}
+          sourcesLoading={service.loading}
           close={() => setDialog(null)}
           done={() => {
             setDialog(null);

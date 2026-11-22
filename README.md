@@ -117,6 +117,17 @@ Municipality-specific purchases:
 compras-crawler sync --municipality-code 4202909 --state-uf SC --source pncp --pncp-modalidade-code 8
 ```
 
+`sync --source pncp` uses the Compras.gov.br module. For the official PNCP
+direct source, inspect the standalone plan without network access:
+
+```bash
+compras-crawler pncp-direct --municipality-code 4202909 --state-uf SC \
+  --start-date 2026-01-01 --end-date 2026-01-31 --db-path pncp_brusque --dry-run
+```
+
+Use a standalone output prefix, not the managed web Bronze. A real run
+(without `--dry-run`) needs separate authorization and never uses `COMPRAS_GOV_TOKEN`.
+
 Concurrent page fetching with serial DuckDB writes (requests are still globally paced by `--delay-seconds` to avoid API rate limits):
 ```bash
 compras-crawler sync --operation consultarUasg --async --concurrency 5 --delay-seconds 1.0

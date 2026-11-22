@@ -405,6 +405,31 @@ def test_cli_full_city_dry_run_does_not_call_api(monkeypatch, tmp_path: Path, ca
     assert "4205407/SC" in output
 
 
+def test_pncp_direct_cli_is_explicit_and_dry_run_never_collects(monkeypatch, tmp_path, capsys):
+    from types import SimpleNamespace
+    from compras_crawler import pncp_direct
+
+    seen = []
+
+    class Collector:
+        def __init__(self, config):
+            seen.append(config)
+        def run(self):
+            return SimpleNamespace(errors=())
+
+    monkeypatch.setenv("COMPRAS_GOV_TOKEN", "never-forwarded")
+    monkeypatch.setattr(pncp_direct, "PncpDirectCollector", Collector)
+    args = ["pncp-direct", "--municipality-code", "4202909", "--state-uf", "SC",
+            "--start-date", "2026-01-01", "--end-date", "2026-01-31",
+            "--db-path", str(tmp_path / "pilot")]
+    assert cli.main([*args, "--dry-run"]) == 0
+    assert not seen
+    assert "never-forwarded" not in capsys.readouterr().out
+    assert cli.main(args) == 0
+    assert seen[0].municipality_code == 4202909
+    assert not hasattr(seen[0], "token")
+
+
 def test_cli_uses_municipality_purchase_mode(monkeypatch, tmp_path: Path):
     dummy = DummyRunner()
     captured = {}

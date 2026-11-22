@@ -80,10 +80,16 @@ export interface Coverage {
   message: string;
   records: number;
   unreconciled: number;
+  exclusion_reasons?: Record<string, number>;
   entity_pages: Record<string, number>;
   snapshot_built_at: string;
   start_date?: string;
   end_date?: string;
+  prior_snapshot?: boolean;
+  sources?: Record<string, {
+    status: string;
+    stages?: Record<string, { status: string; pages: number; records: number }>;
+  }>;
 }
 export interface Municipality {
   id: string;
@@ -132,6 +138,11 @@ export interface PurchaseDetail {
   purchase: Purchase;
   snapshot: string;
   coverage: Coverage;
+  conciliation?: {
+    selected_source: string;
+    divergences: Record<string, Record<string, string | number | null>>;
+    observations: Array<RecordSource & { source: string; entity: string; selected: boolean }>;
+  };
   summary: {
     item_records: number;
     result_records: number;
@@ -152,6 +163,7 @@ export interface PurchaseItem extends RecordSource {
   unit: string | null;
   quantity: number | null;
   estimated_unit_price: number | null;
+  budget_sealed?: boolean | null;
   status: string | null;
   purchase_link: EvidenceLink;
   confirmed_results: number;
@@ -159,7 +171,7 @@ export interface PurchaseItem extends RecordSource {
 export interface ObservedSupplier {
   name: string;
   identifier: string;
-  kind: "cpf" | "cnpj" | null;
+  kind: "cpf" | "cnpj" | "foreign" | null;
   can_open: boolean;
 }
 export interface ItemResult extends RecordSource {
@@ -297,4 +309,5 @@ export interface ServiceStatus {
   error: string | null;
   free_disk_bytes: number;
   max_workers: number;
+  capabilities?: { collection_sources?: string[] };
 }

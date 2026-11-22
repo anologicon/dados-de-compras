@@ -166,6 +166,7 @@ function Items({
                       money(item.estimated_unit_price, false),
                     ],
                     ["Resultados vinculados", int(item.confirmed_results)],
+                    ["Orçamento", item.budget_sealed === true ? "Sigiloso" : null],
                   ]}
                 />
                 {item.identity_status === "unverified" && (
@@ -378,7 +379,7 @@ function Supplier({
       </h3>
       <h4 className="supplier-name">{result.supplier.name}</h4>
       <p>
-        {result.supplier.kind?.toUpperCase()} informado:{" "}
+        {result.supplier.kind === "foreign" ? "PE" : result.supplier.kind?.toUpperCase()} informado:{" "}
         {result.supplier.identifier}
       </p>
       <p className="exploration-note">
@@ -453,6 +454,12 @@ function Supplier({
 }
 
 type Part = "summary" | "items" | "results" | "original" | "origin";
+const sourceName = (source: string) => source === "pncp_direct" ? "PNCP direto" : "Compras.gov.br";
+const comparisonFields: Record<string, string> = {
+  published_on: "Publicação", org_name: "Órgão", modality: "Modalidade",
+  description: "Objeto", estimated: "Valor estimado", awarded: "Valor homologado",
+};
+
 export function PurchaseExplorer({
   city,
   purchase,
@@ -475,6 +482,7 @@ export function PurchaseExplorer({
     setItem(null);
   };
   const summary = detail.data?.summary;
+  const conciliation = detail.data?.conciliation;
   const tabs: { id: Part; label: string; needsData?: boolean }[] = [
     { id: "summary", label: "Resumo" },
     {
@@ -558,6 +566,12 @@ export function PurchaseExplorer({
                 part === "original" ? record.payload_json : record.origin_json,
               )}
             </pre>
+            {conciliation?.observations.filter((row) => !row.selected).map((row, index) => (
+              <details key={`${row.entity}-${index}`} className="source-record">
+                <summary>{sourceName(row.source)} · {row.entity}</summary>
+                <pre className="json">{pretty(part === "original" ? row.payload_json : row.origin_json)}</pre>
+              </details>
+            ))}
             <p className="exploration-note">
               Dados de origem preservados. Campos ausentes não são convertidos
               em zero.
@@ -584,6 +598,22 @@ export function PurchaseExplorer({
                 ["Valor homologado", money(record.awarded, false)],
               ]}
             />
+            {conciliation && (
+              <div className="exploration-note">
+                <p>Valores selecionados: {sourceName(conciliation.selected_source)}.</p>
+                {Object.keys(conciliation.divergences).length > 0 && (
+                  <details>
+                    <summary>Divergências entre fontes</summary>
+                    <ul>{Object.entries(conciliation.divergences).map(([field, bySource]) => (
+                      <li key={field}>{comparisonFields[field] || field}:{" "}
+                        {Object.entries(bySource).map(([source, value]) =>
+                          `${sourceName(source)}: ${value ?? "não informado"}`).join(" · ")}
+                      </li>
+                    ))}</ul>
+                  </details>
+                )}
+              </div>
+            )}
             {summary && (
               <>
                 <div className="relationship-metrics">

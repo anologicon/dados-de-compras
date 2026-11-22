@@ -12,7 +12,7 @@ import sys
 import time
 import uuid
 
-from ..crawl_state import CrawlStopped
+from ..crawl_state import CrawlDiskReserve, CrawlStopped
 from .store import AppStore
 
 
@@ -43,7 +43,7 @@ class WorkerControl:
         if status not in ("running", "projecting"):
             raise CrawlStopped("parada solicitada ou execução recuperada por outro serviço")
         if shutil.disk_usage(self.store.root).free < self.reserve_bytes:
-            raise OSError("reserva mínima de espaço em disco atingida; Bronze preservado")
+            raise CrawlDiskReserve("reserva mínima de espaço em disco atingida; Bronze preservado")
 
     def wait(self, seconds: float) -> None:
         end = time.monotonic() + seconds

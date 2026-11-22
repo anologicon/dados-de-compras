@@ -58,9 +58,12 @@ test("fila de coletas e agenda persistente", async ({ page }) => {
     .getByRole("button", { name: "Nova coleta", exact: true })
     .first()
     .click();
+  await expect(page.getByRole("checkbox", { name: "PNCP direto" })).toBeChecked();
+  const runRequest = page.waitForRequest(r => r.url().endsWith("/api/runs") && r.method() === "POST");
   await page
     .getByRole("button", { name: "Adicionar à fila", exact: true })
     .click();
+  expect((await runRequest).postDataJSON().collection_sources).toEqual(["comprasgov", "pncp_direct"]);
   await expect(
     page.getByText("Na fila", { exact: true }).first(),
   ).toBeVisible();
@@ -78,10 +81,13 @@ test("fila de coletas e agenda persistente", async ({ page }) => {
   ).toBeVisible();
   await page.getByRole("button", { name: "Agendas", exact: true }).click();
   await page.getByRole("button", { name: "Nova agenda", exact: true }).click();
+  await expect(page.getByRole("checkbox", { name: "PNCP direto" })).toBeChecked();
+  const scheduleRequest = page.waitForRequest(r => r.url().endsWith("/api/schedules") && r.method() === "POST");
   await page
     .getByRole("textbox", { name: "Nome da rotina", exact: true })
     .fill("Rotina de teste");
   await page.getByRole("button", { name: "Criar agenda", exact: true }).click();
+  expect((await scheduleRequest).postDataJSON().collection_sources).toEqual(["comprasgov", "pncp_direct"]);
   await expect(
     page.getByRole("heading", { name: "Rotina de teste" }),
   ).toBeVisible();
@@ -96,6 +102,20 @@ test("fila de coletas e agenda persistente", async ({ page }) => {
   await expect(
     page.getByRole("heading", { name: "Rotina de teste" }),
   ).toBeVisible();
+});
+
+test("backend antigo não recebe a seleção de fontes", async ({ page }) => {
+  await page.route("**/api/status", async (route) => {
+    const response = await route.fetch();
+    const { capabilities: _, ...legacy } = await response.json();
+    await route.fulfill({ response, json: legacy });
+  });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Nova coleta", exact: true }).first().click();
+  await expect(page.getByText("PNCP direto não está disponível neste backend.")).toBeVisible();
+  const queued = page.waitForRequest(r => r.url().endsWith("/api/runs") && r.method() === "POST");
+  await page.getByRole("button", { name: "Adicionar à fila", exact: true }).click();
+  expect((await queued).postDataJSON()).not.toHaveProperty("collection_sources");
 });
 
 test("layout móvel não causa rolagem horizontal da página", async ({

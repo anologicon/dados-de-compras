@@ -93,6 +93,7 @@ class ComprasClient:
         request_interval_seconds: float = 0.0,
         throttle: RequestThrottle | None = None,
         sleep_fn: Callable[[float], None] | None = None,
+        reject_redirects: bool = False,
     ):
         validate_base_url(base_url, token=token)
         if timeout <= 0:
@@ -114,6 +115,7 @@ class ComprasClient:
         self.rate_limit_sleep_seconds = rate_limit_sleep_seconds
         self.throttle = throttle or RequestThrottle(request_interval_seconds)
         self.sleep_fn = sleep_fn
+        self.reject_redirects = reject_redirects
 
     def _headers(self, accept: str = "json", *, use_auth: bool = False) -> dict[str, str]:
         headers: dict[str, str] = {}
@@ -135,6 +137,8 @@ class ComprasClient:
     ) -> PageData:
         url = urljoin(self.base_url + "/", path.lstrip("/"))
         response = self._get_with_retries(url, params=params, accept=accept, use_auth=use_auth)
+        if self.reject_redirects and 300 <= response.status_code < 400:
+            raise requests.HTTPError("Redirecionamento não permitido na coleta gerenciada.", response=response)
         response.raise_for_status()
         content_type = response.headers.get("content-type", "")
         if accept == "csv" or "csv" in content_type:
@@ -182,10 +186,12 @@ class ComprasClient:
 
     def _get_with_retries(self, url: str, *, params: dict[str, Any], accept: str, use_auth: bool) -> requests.Response:
         last_error: requests.RequestException | None = None
+        options = {"allow_redirects": False} if self.reject_redirects else {}
         for attempt in range(self.max_retries + 1):
             self.throttle.wait()
             try:
-                response = self.session.get(url, params=params, headers=self._headers(accept, use_auth=use_auth), timeout=self.timeout)
+                response = self.session.get(url, params=params, headers=self._headers(accept, use_auth=use_auth),
+                                            timeout=self.timeout, **options)
             except (requests.ConnectionError, requests.Timeout) as exc:
                 last_error = exc
                 if attempt >= self.max_retries:

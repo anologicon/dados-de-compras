@@ -1,16 +1,28 @@
 from __future__ import annotations
 
 from datetime import date, datetime, time
-from typing import Literal
+from typing import Annotated, Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from .locations import UFS, validate_city_state
 
 
 class Input(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+
+CollectionSource = Literal["comprasgov", "pncp_direct"]
+
+
+def distinct_sources(values: list[CollectionSource]) -> list[CollectionSource]:
+    if len(values) != len(set(values)):
+        raise ValueError("fontes de coleta não podem ser duplicadas")
+    return values
+
+
+CollectionSources = Annotated[list[CollectionSource], Field(min_length=1), AfterValidator(distinct_sources)]
 
 
 class CityInput(Input):
@@ -39,6 +51,7 @@ class RunInput(Input):
     max_pages_per_job: int = Field(default=500, ge=1, le=100000)
     max_purchases: int = Field(default=0, ge=0)
     max_units: int = Field(default=0, ge=0)
+    collection_sources: CollectionSources = Field(default_factory=lambda: ["comprasgov"])
 
     @model_validator(mode="after")
     def dates_valid(self):
@@ -58,6 +71,7 @@ class ScheduleInput(Input):
     due_at: datetime | None = None
     start_date: date | None = None
     end_date: date | None = None
+    collection_sources: CollectionSources = Field(default_factory=lambda: ["comprasgov"])
 
     @model_validator(mode="after")
     def schedule_valid(self):

@@ -15,14 +15,40 @@ async function openPurchase(page: Page) {
   return page.getByRole("dialog", { name: "Detalhes da compra" });
 }
 
+test("ficha distingue valor selecionado e originais das duas fontes", async ({ page }) => {
+  await page.route("**/purchase-detail?*", async (route) => {
+    const response = await route.fetch();
+    const body = await response.json();
+    body.conciliation = {
+      selected_source: "pncp_direct",
+      observations: [
+        { source: "pncp_direct", entity: "pncp_direct_contratacao", selected: true,
+          payload_json: '{"objeto":"original-direto"}', origin_json: '{"job":"direto"}' },
+        { source: "comprasgov", entity: "pncp_contratacao", selected: false,
+          payload_json: '{"objeto":"original-comprasgov"}', origin_json: '{"job":"gov"}' },
+      ],
+      divergences: { estimated: { pncp_direct: 0, comprasgov: 50 } },
+    };
+    await route.fulfill({ response, json: body });
+  });
+  const dialog = await openPurchase(page);
+  await expect(dialog.getByText("Valores selecionados: PNCP direto.")).toBeVisible();
+  await dialog.getByRole("button", { name: "Registro original", exact: true }).click();
+  const alternative = dialog.getByText("Compras.gov.br · pncp_contratacao", { exact: true });
+  await alternative.click();
+  await expect(dialog.getByText(/original-comprasgov/)).toBeVisible();
+});
+
 test("compra → item → resultado → fornecedor preserva contexto, fontes e CPF mascarado", async ({
   page,
 }) => {
   const errors: string[] = [];
   const mutations: string[] = [];
+  const external: string[] = [];
   page.on("pageerror", (error) => errors.push(error.message));
   page.on("request", (request) => {
     if (request.method() !== "GET") mutations.push(request.url());
+    if (new URL(request.url()).hostname !== "127.0.0.1") external.push(request.url());
   });
   const dialog = await openPurchase(page);
   await expect(
@@ -92,6 +118,7 @@ test("compra → item → resultado → fornecedor preserva contexto, fontes e C
   await expect(dialog.locator(".result-card")).toHaveCount(3);
   expect(errors).toEqual([]);
   expect(mutations).toEqual([]);
+  expect(external).toEqual([]);
 });
 
 test("vínculos ambíguos e resultados sem item são explícitos e não forçam associação", async ({
