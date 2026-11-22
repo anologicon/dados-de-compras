@@ -1,4 +1,5 @@
 .env
+.ae-agent-go/
 agent_state.json
 task_board.json
 .venv/
