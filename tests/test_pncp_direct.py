@@ -17,6 +17,7 @@ from compras_crawler.pncp_direct import (
     control_incoherence,
     parse_pncp_control,
     quantity_from_payload,
+    record_modality_codes,
     supplier_identity,
 )
 
@@ -33,6 +34,15 @@ RESULTS_JOB = "pncp_direto_resultados_item_1_34123456000100-1-000123_2026"
 
 
 # ------------------------------------------------------------- sample fixtures
+
+
+def test_public_modality_domain_reads_observed_id_and_legacy_aliases():
+    assert record_modality_codes([
+        {"id": 20, "nome": "Diálogo Competitivo Internacional", "statusAtivo": True},
+        {"id": 8, "nome": "Dispensa", "statusAtivo": True},
+        {"codigo": "8"}, {"codigoModalidade": 9},
+        {"id": "invalid"}, {"id": 0}, {"id": -1}, {"id": True},
+    ]) == [8, 9, 20]
 
 
 def purchase_row(**overrides):

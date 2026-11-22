@@ -106,6 +106,15 @@ def build_parser() -> argparse.ArgumentParser:
     full_city_parser.add_argument("--no-price-research", action="store_true", help="Skip derived price-research endpoint fanout")
     full_city_parser.add_argument("--dry-run", action="store_true", help="Validate and print the planned full-city crawl without calling the API")
 
+    direct = subparsers.add_parser("pncp-direct", help="Collect from the official PNCP, not the Compras.gov.br PNCP module")
+    direct.add_argument("--db-path", type=Path, required=True, help="Standalone output prefix (not a managed web workspace)")
+    direct.add_argument("--start-date", required=True)
+    direct.add_argument("--end-date", required=True)
+    direct.add_argument("--state-uf", required=True)
+    direct.add_argument("--municipality-code", type=int, required=True)
+    direct.add_argument("--no-resume", action="store_true", help="Collect again instead of using confirmed pages")
+    direct.add_argument("--dry-run", action="store_true", help="Validate the plan without collecting or writing")
+
     migrate_parser = subparsers.add_parser("migrate-bronze", help="Copy bronze_pages from a legacy single DuckDB into the Bronze DB")
     migrate_parser.add_argument("--source-db-path", type=Path, default=Path("compras.duckdb"), help="Legacy DuckDB containing bronze_pages")
     migrate_parser.add_argument(
@@ -142,6 +151,23 @@ def main(argv: Sequence[str] | None = None) -> int:
         from .mcp_server import run_from_args
 
         return run_from_args(args, parser)
+
+    if args.command == "pncp-direct":
+        from .pncp_direct import PncpDirectCollector, PncpDirectConfig
+
+        try:
+            config = PncpDirectConfig(
+                db_path=args.db_path, start_date=args.start_date, end_date=args.end_date,
+                state_uf=args.state_uf, municipality_code=args.municipality_code, resume=not args.no_resume,
+            )
+        except ValueError as exc:
+            parser.error(str(exc))
+        if args.dry_run:
+            print(f"PNCP direto: {config.municipality_code}/{config.state_uf}, "
+                  f"{config.start_date} a {config.end_date}, domínio publicado de modalidades")
+            print(f"Bronze: {config.bronze_db_path}")
+            return 0
+        return int(bool(PncpDirectCollector(config).run().errors))
 
     load_dotenv(dotenv_path=Path.cwd() / ".env")
 

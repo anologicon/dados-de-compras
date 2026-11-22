@@ -94,7 +94,8 @@ def create_app(workspace: str | Path = ".compras-web", *, port: int = 8000,
     def status():
         return dict(service="running" if start_workers else "disabled", max_workers=2,
                     request_interval_seconds=1, free_disk_bytes=shutil.disk_usage(store.root).free,
-                    reserve_bytes=reserve_bytes, error=service.error)
+                    reserve_bytes=reserve_bytes, error=service.error,
+                    capabilities={"collection_sources": ["comprasgov", "pncp_direct"]})
 
     @app.get("/api/cities")
     def cities():

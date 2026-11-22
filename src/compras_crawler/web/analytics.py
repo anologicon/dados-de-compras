@@ -14,7 +14,7 @@ import uuid
 import duckdb
 
 from ..normalize import extract_records, stable_hash, stable_json
-from ..pncp_direct import control_incoherence, nested_first
+from ..pncp_direct import control_incoherence, nested_first, parse_pncp_control
 from .store import AppStore
 
 PURCHASE_PNCP = {"pncp_contratacao", "pncp_contratacao_id"}
@@ -89,6 +89,13 @@ def day(value: Any) -> str | None:
         return None
 
 
+def purchase_cancelled(row: dict[str, Any]) -> bool:
+    status = str(first(row, "situacaoCompraNome", "situacaoCompraNomePncp", "situacaoCompra") or "")
+    return bool(first(row, "dataCancelamentoPncp", "dataCancelamento")) or status.strip().casefold() in {
+        "anulada", "anulado", "cancelada", "cancelado", "revogada", "revogado",
+    }
+
+
 def normalize(entity: str, row: dict[str, Any], origin: dict[str, Any]) -> list[Any]:
     if isinstance(row, dict) and entity.startswith("pncp_direct_"):
         view = _expand_nested(row)
@@ -122,7 +129,16 @@ def normalize(entity: str, row: dict[str, Any], origin: dict[str, Any]) -> list[
     elif family == "units":
         identity = first(view, "codigoUasg")
     identity_text = stable_json(identity) if identity is not None else None
-    record_id = stable_hash([family, identity_text or stable_hash(view)])
+    record_key = [family, identity_text or stable_hash(view)]
+    if family == "pncp":
+        # Collapse matching list/detail observations, not competing controls or
+        # reports from different collection sources.
+        record_key.extend([entity.startswith("pncp_direct_"), control])
+    elif family in ("items", "results"):
+        # The graph counts observations, not deduplicated child entities. Do
+        # not overwrite a potentially different body from the other source.
+        record_key.append(entity.startswith("pncp_direct_"))
+    record_id = stable_hash(record_key)
     published = day(first(view, "dataPublicacaoPncp", "data_publicacao", "dt_data_edital"))
     city = first(view, "unidadeOrgaoCodigoIbge", "codigoMunicipioIbge")
     unit = first(view, "unidadeOrgaoCodigoUnidade", "codigoUasg", "co_uasg", "uasg")
@@ -131,7 +147,9 @@ def normalize(entity: str, row: dict[str, Any], origin: dict[str, Any]) -> list[
     # Control vs body coherence (same rule as the collector: divergence only
     # counts when the body field is present). Incoherent controls never become
     # purchases in the projection; the exclusion reason stays explicit.
-    incoherent = family == "pncp" and control is not None and bool(control_incoherence(control, view))
+    is_direct_purchase = entity == "pncp_direct_contratacao"
+    incoherent = (family == "pncp" and control is not None and bool(control_incoherence(control, view))
+                  or is_direct_purchase and parse_pncp_control(control) is None)
     return [
         record_id, family, entity, identity_text, str(purchase_id) if purchase_id is not None else None,
         str(control) if control is not None else None, str(item_id) if item_id is not None else None,
@@ -141,7 +159,8 @@ def normalize(entity: str, row: dict[str, Any], origin: dict[str, Any]) -> list[
         str(first(view, "objetoCompra", "objeto", "objeto_licitacao", "ds_objeto", "descricaoResumida", "descricao", "nomeRazaoSocial") or ""),
         number(first(view, "valorTotalEstimado", "valor_estimado_total", "vl_estimado_total")),
         number(first(view, "valorTotalHomologado", "valor_homologado_total", "vl_homologado_total")),
-        excluded, incoherent, str(first(view, "codItemCatalogo", "codigoItemCatalogo") or ""),
+        excluded, incoherent, family in ("pncp", "legacy") and purchase_cancelled(view),
+        str(first(view, "codItemCatalogo", "codigoItemCatalogo") or ""),
         str(first(view, "materialOuServico", "tipoItem") or ""), str(first(view, "unidadeMedida", "unidadeFornecimento") or ""),
         str(supplier) if supplier is not None else None,
         str(first(view, "nomeRazaoSocialFornecedor", "nomeFornecedor", "nomeRazaoSocial") or ""),
@@ -174,7 +193,7 @@ def build_snapshot(store: AppStore, city_id: str, *, coverage: dict[str, Any] | 
                 id TEXT, family TEXT, entity TEXT, identity TEXT, purchase_id TEXT, control TEXT, item_id TEXT,
                 city_code TEXT, unit_code TEXT, published_on DATE, org_name TEXT, modality TEXT, description TEXT,
                 estimated DECIMAL(24,4), awarded DECIMAL(24,4), excluded BOOLEAN, control_incoherent BOOLEAN,
-                catalog_code TEXT, item_type TEXT, unit TEXT, supplier_id TEXT, supplier_name TEXT,
+                cancelled BOOLEAN, catalog_code TEXT, item_type TEXT, unit TEXT, supplier_id TEXT, supplier_name TEXT,
                 quantity DECIMAL(24,4), unit_price DECIMAL(24,4), estimated_unit_price DECIMAL(24,4),
                 contract_value DECIMAL(24,4), updated TEXT, fetched_at TEXT, origin_json TEXT, payload_json TEXT
             )""")
@@ -210,37 +229,58 @@ def build_snapshot(store: AppStore, city_id: str, *, coverage: dict[str, Any] | 
             target.execute("DROP TABLE observations")
             # Only explicit municipality/UASG evidence is used. The filename is never geographic evidence.
             target.execute("""CREATE TABLE purchase_candidates AS
-                WITH aliases AS (
-                    SELECT control, min(purchase_id) purchase_id FROM records WHERE family='pncp'
-                    AND control IS NOT NULL AND purchase_id IS NOT NULL GROUP BY control HAVING count(DISTINCT purchase_id)=1
-                ), conflicts AS (
-                    SELECT control FROM records WHERE family='pncp' AND control IS NOT NULL
-                    AND purchase_id IS NOT NULL GROUP BY control HAVING count(DISTINCT purchase_id)>1
+                WITH pairs AS (
+                    SELECT DISTINCT control,purchase_id FROM records WHERE family IN ('pncp','legacy')
+                    AND control IS NOT NULL AND purchase_id IS NOT NULL
+                ), conflicting_ids AS (
+                    SELECT purchase_id FROM pairs GROUP BY purchase_id HAVING count(*)>1
+                ), conflicting_controls AS (
+                    SELECT control FROM pairs GROUP BY control HAVING count(*)>1
+                    UNION SELECT control FROM pairs WHERE purchase_id IN (SELECT purchase_id FROM conflicting_ids)
+                ), aliases AS (
+                    SELECT control,purchase_id FROM pairs WHERE control NOT IN (SELECT control FROM conflicting_controls)
                 ), units AS (
                     SELECT unit_code,min(city_code) city_code FROM records WHERE family='units'
                     AND city_code IS NOT NULL GROUP BY unit_code HAVING count(DISTINCT city_code)=1
-                )
-                SELECT r.*, CASE WHEN coalesce(r.purchase_id,a.purchase_id) IS NOT NULL
+                ), candidates AS (
+                    SELECT r.*, CASE WHEN coalesce(r.purchase_id,a.purchase_id) IS NOT NULL
                     THEN 'id:' || coalesce(r.purchase_id,a.purchase_id) ELSE 'pncp:' || r.control END purchase_key,
                     coalesce(r.city_code,u.city_code) resolved_city,
-                    CASE WHEN r.control IN (SELECT control FROM conflicts) THEN 'Identificadores conflitantes'
-                         WHEN r.control_incoherent THEN 'Controle incoerente com o corpo'
-                         WHEN r.identity IS NULL THEN 'Sem identificador seguro'
-                         WHEN coalesce(r.city_code,u.city_code) IS NULL THEN 'Município não comprovado'
+                    CASE WHEN starts_with(r.entity,'pncp_direct_') THEN 'pncp_direct' ELSE 'comprasgov' END collection_source,
+                    CASE WHEN r.control IN (SELECT control FROM conflicting_controls)
+                              OR r.purchase_id IN (SELECT purchase_id FROM conflicting_ids) THEN 'Identificadores conflitantes'
+                          WHEN r.control_incoherent THEN 'Controle incoerente com o corpo'
+                          WHEN r.identity IS NULL THEN 'Sem identificador seguro'
+                          WHEN coalesce(r.city_code,u.city_code) IS NULL THEN 'Município não comprovado'
                          WHEN coalesce(r.city_code,u.city_code) <> ? THEN 'Outro município'
                          WHEN r.published_on IS NULL THEN 'Data de publicação desconhecida'
                          ELSE NULL END exclusion_reason
-                FROM records r LEFT JOIN aliases a ON a.control=r.control LEFT JOIN units u ON u.unit_code=r.unit_code
-                WHERE r.family IN ('pncp','legacy')""", [city_id])
+                    FROM records r LEFT JOIN aliases a ON a.control=r.control
+                    LEFT JOIN units u ON u.unit_code=r.unit_code AND NOT starts_with(r.entity,'pncp_direct_')
+                    WHERE r.family IN ('pncp','legacy')
+                ), source_conflicts AS (
+                    SELECT purchase_key, CASE
+                        WHEN bool_or(control_incoherent) THEN 'Controle incoerente com o corpo'
+                        WHEN count(DISTINCT resolved_city)>1 THEN 'Municípios conflitantes entre origens'
+                        WHEN count(DISTINCT (excluded,cancelled))>1 THEN 'Cancelamento ou exclusão conflitante entre origens'
+                    END reason
+                    FROM candidates GROUP BY purchase_key HAVING count(DISTINCT collection_source)>1
+                )
+                SELECT c.* REPLACE (coalesce(s.reason,c.exclusion_reason) AS exclusion_reason)
+                FROM candidates c LEFT JOIN source_conflicts s USING (purchase_key)""", [city_id])
             target.execute("""CREATE TABLE purchases AS SELECT * EXCLUDE(rank) FROM (
                 SELECT *, row_number() OVER (PARTITION BY purchase_key ORDER BY
-                    CASE WHEN family='pncp' THEN 1 ELSE 0 END DESC, fetched_at DESC, updated DESC) rank
+                     CASE WHEN collection_source='pncp_direct' THEN 2 WHEN family='pncp' THEN 1 ELSE 0 END DESC,
+                     fetched_at DESC, updated DESC, id) rank
                 FROM purchase_candidates
-                ) WHERE rank=1 AND NOT excluded AND exclusion_reason IS NULL""")
+                 ) WHERE rank=1 AND NOT excluded AND NOT cancelled AND exclusion_reason IS NULL""")
             total = target.execute("SELECT count(*) FROM records").fetchone()[0]
-            uncertain = target.execute("SELECT count(*) FROM purchase_candidates WHERE exclusion_reason IS NOT NULL AND exclusion_reason <> 'Outro município'").fetchone()[0]
+            reasons = dict(target.execute("""SELECT exclusion_reason,count(*) FROM purchase_candidates
+                WHERE exclusion_reason IS NOT NULL AND exclusion_reason <> 'Outro município'
+                GROUP BY exclusion_reason ORDER BY exclusion_reason""").fetchall())
             summary = dict(status="unverified", message="Importação: cobertura e conclusão da coleta de origem não verificadas.",
-                           entity_pages=entity_pages, records=total, unreconciled=uncertain,
+                           entity_pages=entity_pages, records=total, unreconciled=sum(reasons.values()),
+                           exclusion_reasons=reasons,
                            snapshot_built_at=datetime.now(timezone.utc).isoformat())
             summary.update(coverage or {})
             target.execute("CREATE TABLE snapshot_metadata (value TEXT)")

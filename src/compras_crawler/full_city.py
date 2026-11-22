@@ -11,12 +11,32 @@ import re
 import requests
 
 from .client import ComprasClient, PageData, retry_after_seconds, validate_base_url
-from .crawl_state import CrawlState, CrawlStopped
+from .crawl_state import CrawlDiskReserve, CrawlState, CrawlStopped
 from .normalize import stable_hash, stable_json
 from .storage import DEFAULT_DB_PREFIX, BronzeWarehouse, SqliteOpsStore, derive_bronze_db_path, derive_ops_db_path
 
 DEFAULT_BASE_URL = "https://dadosabertos.compras.gov.br"
 DEFAULT_PNCP_MODALIDADES = tuple(range(1, 14))
+
+
+def ocds_error_detail(response: requests.Response, token: str | None) -> str:
+    """Keep a small validation message, never headers, raw HTML or raw JSON."""
+    if len(response.content) > 16_384:
+        return ""
+    try:
+        body = response.json()
+    except ValueError:
+        return ""
+    if not isinstance(body, dict):
+        return ""
+    detail = next((body[key] for key in ("message", "mensagem", "detail", "error")
+                   if isinstance(body.get(key), str) and body[key].strip()), "")
+    if token:
+        detail = detail.replace(token, "[redacted]")
+    # Do not preserve a credential-shaped suffix, even if echoed in prose.
+    detail = re.split(r"(?i)\b(?:bearer\s+|(?:authorization|password|senha|token|"
+                      r"cookie|secret|api[_ -]?key)\s*[:=])", detail, maxsplit=1)[0]
+    return " ".join(detail.split())[:320]
 
 
 @dataclass(frozen=True)
@@ -111,6 +131,7 @@ class FullCityCrawler:
             request_interval_seconds=config.delay_seconds,
             throttle=throttle,
             sleep_fn=self._sleep,
+            reject_redirects=config.collection_id is not None,
         )
         self.warehouse = BronzeWarehouse(config.bronze_db_path)
         self.crawl_state = CrawlState(self.warehouse)
@@ -156,7 +177,8 @@ class FullCityCrawler:
     def _run_phases(self) -> None:
         self._log("[1/9] PNCP contratações por modalidade")
         pncp_compras = self._crawl_pncp_contratacoes()
-        purchase_ids = self._limited(unique_sorted(first_present(row, "idCompra") for row in pncp_compras), self.config.max_purchases)
+        purchase_ids = self._limited(unique_sorted(first_present(row, "idCompra") for row in pncp_compras),
+                                     self.config.max_purchases, job_name="pncp_purchase_fanout_limit")
         pncp_units = unique_sorted(first_present(row, "unidadeOrgaoCodigoUnidade") for row in pncp_compras)
         pncp_orgao_codes = unique_sorted(first_present(row, "codigoOrgao") for row in pncp_compras)
         pncp_cnpjs = unique_sorted(first_present(row, "orgaoEntidadeCnpj") for row in pncp_compras)
@@ -467,6 +489,8 @@ class FullCityCrawler:
         state = self.crawl_state.open_job(key, job_name, resume=self.config.resume)
         pages = self.crawl_state.load_pages(key, job_name, state["generation"])
         records = self.crawl_state.records(pages)
+        self.stats[job_name]["pages"] += len(pages)
+        self.stats[job_name]["records"] += len(records)
         if state["complete"]:
             self._log(f"  {job_name}: retomado, completo, records={len(records)}")
             return records
@@ -522,7 +546,7 @@ class FullCityCrawler:
             self._check_stop()
             try:
                 return self.client.fetch_page(path, params, use_auth=False), False
-            except CrawlStopped:
+            except (CrawlStopped, CrawlDiskReserve):
                 raise
             except requests.HTTPError as exc:
                 status_code = exc.response.status_code if exc.response is not None else None
@@ -530,7 +554,7 @@ class FullCityCrawler:
                     self.stats[job_name]["auth_retries"] += 1
                     try:
                         return self.client.fetch_page(path, params, use_auth=True), True
-                    except CrawlStopped:
+                    except (CrawlStopped, CrawlDiskReserve):
                         raise
                     except Exception as auth_exc:  # noqa: BLE001
                         self._record_error(job_name, int(params.get("pagina", 1) or 1), f"auth retry failed: {auth_exc}", None)
@@ -546,7 +570,10 @@ class FullCityCrawler:
                             throttle.pause_for(sleep_seconds)
                         self._sleep(sleep_seconds)
                     continue
-                self._record_error(job_name, int(params.get("pagina", 1) or 1), f"HTTP {status_code}: {exc}", None)
+                detail = (ocds_error_detail(exc.response, self.config.token)
+                          if status_code == 400 and path == "/modulo-ocds/1_releases" else "")
+                message = f"HTTP {status_code}: {exc}" + (f" — {detail}" if detail else "")
+                self._record_error(job_name, int(params.get("pagina", params.get("page", 1)) or 1), message, None)
                 return None, False
             except Exception as exc:  # noqa: BLE001
                 self._record_error(job_name, int(params.get("pagina", 1) or 1), str(exc), None)
@@ -570,9 +597,9 @@ class FullCityCrawler:
                 return page_data.page_number < int(raw.get("totalPaginas") or 0)
         return bool(page_data.records)
 
-    def _limited(self, values: list[str], max_count: int) -> list[str]:
+    def _limited(self, values: list[str], max_count: int, *, job_name: str = "fanout_limit") -> list[str]:
         if max_count and len(values) > max_count:
-            self._record_error("fanout_limit", None, f"fanout truncated: {len(values)} values limited to {max_count}", None)
+            self._record_error(job_name, None, f"fanout truncated: {len(values)} values limited to {max_count}", None)
             return values[:max_count]
         return values
 

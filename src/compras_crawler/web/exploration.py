@@ -28,8 +28,15 @@ def item_number(payload: dict[str, Any]) -> str | None:
 def supplier_document(payload: dict[str, Any]) -> tuple[str, str] | None:
     """Observed supplier identity: nested PNCP fornecedor or flat legacy row."""
     fornecedor = payload.get("fornecedor") if isinstance(payload.get("fornecedor"), dict) else {}
-    return document(fornecedor.get("niFornecedor") or payload.get("niFornecedor") or payload.get("nuDocumento"),
-                    fornecedor.get("tipoPessoa") or payload.get("tipoPessoa") or "")
+    nested_id = fornecedor.get("niFornecedor")
+    flat_id = first(payload, "niFornecedor", "nuDocumento")
+    nested_type, flat_type = fornecedor.get("tipoPessoa"), payload.get("tipoPessoa")
+    if nested_id not in (None, ""):
+        nested = document(nested_id, nested_type)
+        if flat_id not in (None, "") and document(flat_id, flat_type) != nested:
+            return None
+        return nested
+    return document(flat_id, flat_type)
 
 
 def link(status: str, reason: str, evidence: list[str] | None = None) -> dict[str, Any]:
@@ -49,13 +56,17 @@ def flag(value: Any) -> bool | None:
 
 
 def document(value: Any, person_type: Any = None) -> tuple[str, str] | None:
-    """Normalize only domestic document formatting, never pad or guess IDs."""
+    """Keep explicitly foreign IDs separate; never pad or guess domestic IDs."""
     raw = text(value)
+    person = str(person_type or "").strip().upper()
+    if person == "PE":
+        # A foreign document has no domestic length/check-digit rules; keep
+        # the observed spelling, but do not treat masked fragments as IDs.
+        return ("foreign", raw.strip()) if raw and re.fullmatch(r"[^\W_][\w ./-]{0,127}", raw.strip()) else None
     if not raw or not re.fullmatch(r"[0-9.\-/\s]+", raw):
         return None
     digits = re.sub(r"[.\-/\s]", "", raw)
     kind = {11: "cpf", 14: "cnpj"}.get(len(digits))
-    person = str(person_type or "").upper()
     if person and person not in ("PF", "PJ", "F", "J"):
         return None
     if person in ("PF", "F") and kind != "cpf":
@@ -71,6 +82,8 @@ def display_document(doc: tuple[str, str] | None) -> str:
     kind, digits = doc
     if kind == "cpf":
         return "***.***.***-" + digits[-2:]
+    if kind == "foreign":
+        return "Documento estrangeiro (oculto)"
     return f"{digits[:2]}.{digits[2:5]}.{digits[5:8]}/{digits[8:12]}-{digits[12:]}"
 
 
@@ -233,6 +246,7 @@ class PurchaseGraph:
                     catalog_code=row["catalog_code"] or None, item_type=row["item_type"] or None,
                     unit=row["unit"] or None, quantity=number(payload.get("quantidade")),
                     estimated_unit_price=row["estimated_unit_price"], status=text(payload.get("situacaoCompraItemNome")),
+                    budget_sealed=flag(payload.get("orcamentoSigiloso")),
                     purchase_link=self.item_links[row["id"]], confirmed_results=confirmed,
                     payload_json=row["payload_json"], origin_json=row["origin_json"])
 
@@ -264,7 +278,33 @@ def purchase_detail(store: AppStore, city_id: str, purchase_key: str) -> dict[st
     with connection(store, city_id) as con:
         graph = PurchaseGraph(con, purchase_key, None)
         purchase = {key: graph.purchase[key] for key in PURCHASE_COLUMNS.split(",")}
-        return dict(purchase=purchase, snapshot=graph.snapshot, coverage=graph.coverage, summary=graph.summary())
+        return dict(purchase=purchase, snapshot=graph.snapshot, coverage=graph.coverage, summary=graph.summary(),
+                    conciliation=purchase_origins(con, graph.purchase))
+
+
+def purchase_origins(con, selected: dict[str, Any]) -> dict[str, Any]:
+    """Describe selection separately from the raw bodies; never fill missing values."""
+    fields = ("published_on", "org_name", "modality", "description", "estimated", "awarded")
+    candidates = rows(con, """SELECT * FROM purchase_candidates WHERE purchase_key=?
+        ORDER BY CASE WHEN family='pncp' THEN 1 ELSE 0 END DESC, fetched_at DESC, updated DESC, id""",
+                      [selected["purchase_key"]])
+    source = lambda row: "pncp_direct" if row["entity"].startswith("pncp_direct_") else "comprasgov"
+    latest = {source(selected): selected}
+    observations = []
+    for row in candidates:
+        name = source(row)
+        latest.setdefault(name, row)
+        observations.append(dict(source=name, selected=row["id"] == selected["id"], entity=row["entity"],
+                                 purchase_id=row["purchase_id"], control=row["control"],
+                                 exclusion_reason=row["exclusion_reason"], excluded=row["excluded"],
+                                 payload_json=row["payload_json"], origin_json=row["origin_json"]))
+    divergences = {}
+    if len(latest) > 1:
+        for field in fields:
+            values = {name: row[field] for name, row in latest.items()}
+            if len(set(values.values())) > 1:
+                divergences[field] = values
+    return dict(selected_source=source(selected), divergences=divergences, observations=observations)
 
 
 def purchase_items(store: AppStore, city_id: str, purchase_key: str, snapshot: str,
@@ -308,7 +348,9 @@ def supplier_detail(store: AppStore, city_id: str, purchase_key: str, snapshot: 
         # Read only the supplier reference family in the same published snapshot.
         # Formatting can differ; type and all digits must match. Names are not keys.
         registrations = []
-        for row in rows(con, "SELECT id,payload_json,origin_json,fetched_at FROM records WHERE family='suppliers' ORDER BY id"):
+        local_rows = [] if doc[0] == "foreign" else rows(
+            con, "SELECT id,payload_json,origin_json,fetched_at FROM records WHERE family='suppliers' ORDER BY id")
+        for row in local_rows:
             record = json.loads(row["payload_json"])
             provided = [key for key in ("cnpj", "cpf") if record.get(key) not in (None, "")]
             docs = [candidate for key in provided

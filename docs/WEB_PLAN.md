@@ -12,7 +12,38 @@ Plano técnico, contratos oficiais, etapas e critérios de aceite: [Integração
 - Cliente e coletor durável implementados em `src/compras_crawler/pncp_direct.py` (`PncpDirectClient`, `PncpDirectCollector`), separados do `FullCityCrawler`: hosts/rotas validados, redirects não seguidos, sem autenticação, parsing por operação, verificação de quantidade por payload, controles incoerentes e páginas repetidas explícitos, retomada por chaves de workspace próprias com página + checkpoint na mesma transação do Bronze, e proveniência `_pncp_*` registrada.
 - Ajuste aditivo em `CrawlState.commit_page` (`extra_metadata`); nenhuma mudança física no esquema Bronze.
 - Validação offline: **27 testes de PNCP direto passando; suíte completa 268 testes Python passando**. Nenhuma coleta real foi executada.
-- Pendente (etapas 3–6 do plano): orquestração municipal com duas fontes sob o mesmo `writer.lock`, integração em web/worker/cli e o piloto de Brusque — este **exige autorização separada**.
+- Evolução offline: a projeção concilia compras só por controle explícito e aliases unívocos;
+  a ficha preserva os originais e mostra divergências. Itens e resultados são registros
+  observados, não uma contagem de entidades únicas entre fontes. A coleta gerenciada roda
+  as fontes escolhidas sob o mesmo `writer.lock` e limite global de requisições. Agendas
+  antigas continuam em Compras.gov.br. A CLI oferece `pncp-direct --dry-run`, sem redefinir
+  `sync --source pncp`.
+- **Piloto real autorizado, aceite completo pendente.** Em 2026-11-22, o PNCP direto
+  retornou 27 observações de listagem nas 20 modalidades consultadas para Brusque
+  em janeiro de 2026. O Bronze confirmou compras da Prefeitura (CNPJ `83102343000194`,
+  IBGE `4202909`), por exemplo `83102343000194-1-000235/2025`, publicada em 2026-01-09.
+  O número da listagem não é o total conciliado da Prefeitura. Ainda é preciso
+  verificar a cobertura de itens e resultados e o aceite da recoleta.
+
+**OCDS não bloqueia o piloto PNCP.** O Bronze de Brusque tem respostas mensais válidas
+do Compras.gov.br; a janela `2026-03-01` a `2026-10-25` retornou `400` para vários
+compradores. A projeção lê `releases` sem contá-los como compras conciliadas, e
+novos `400` OCDS registram diagnóstico JSON limitado e sanitizado. Ainda não há
+limite de janela comprovado: quando houver autorização para nova consulta, testar
+março isoladamente com o mesmo CNPJ, `page` e `offSet` antes de mudar o coletor.
+
+**Evals offline reproduzíveis:**
+
+```sh
+.venv/bin/python -m pytest -q tests/test_web_exploration.py tests/test_web_worker.py tests/test_pncp_direct.py tests/test_full_city.py
+npm --prefix frontend run build
+npm --prefix frontend run test:e2e
+```
+
+O eval ponta a ponta usa as duas fontes simuladas, atribui a compra da prefeitura
+separadamente da federal, segue compra → item → resultado → fornecedor, repete
+a coleta e compara Bronze com o total conciliado. Os casos de falha verificam
+`400`, páginas repetidas, retomada e cobertura sem confundir erro com vazio.
 
 **Somente planejamento na entrega anterior:** nenhum coletor novo, alteração de base, migração, reinício ou coleta real foi executado naquele ciclo. O plano não redefine o aceite anterior de todas as áreas do full-city nem entrega a migração Parquet ou a unificação de armazenamento.
 

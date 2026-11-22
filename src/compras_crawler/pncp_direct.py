@@ -21,7 +21,7 @@ import re
 import requests
 
 from .client import DEFAULT_RETRY_STATUS_CODES, PageData, RequestThrottle, retry_after_seconds
-from .crawl_state import CrawlState, CrawlStopped
+from .crawl_state import CrawlDiskReserve, CrawlState, CrawlStopped
 from .full_city import first_present, sanitize
 from .normalize import stable_hash, stable_json
 from .storage import DEFAULT_DB_PREFIX, BronzeWarehouse, SqliteOpsStore, derive_bronze_db_path, derive_ops_db_path
@@ -630,6 +630,8 @@ class PncpDirectCollector:
         state = self.crawl_state.open_job(key, job_name, resume=self.config.resume)
         pages = self.crawl_state.load_pages(key, job_name, state["generation"])
         records: list[dict[str, Any]] = list(self.crawl_state.records(pages))
+        self.stats[job_name]["pages"] += len(pages)
+        self.stats[job_name]["records"] += len(records)
         if state["complete"]:
             self._log(f"  {job_name}: retomado, completo, records={len(records)}")
             return records
@@ -713,7 +715,7 @@ class PncpDirectCollector:
             self._check_stop()
             try:
                 return self.client.fetch(url, params, expect=expect)
-            except CrawlStopped:
+            except (CrawlStopped, CrawlDiskReserve):
                 raise
             except requests.HTTPError as exc:
                 status_code = exc.response.status_code if exc.response is not None else None
@@ -824,15 +826,11 @@ class PncpDirectCollector:
 
 
 def record_modality_codes(records: list[dict[str, Any]]) -> list[int]:
-    """Codes from the published modality domain; only int-convertible values count."""
-    codes: list[str] = []
+    """Read the domain's published `id`, retaining compatibility with older aliases."""
+    codes: set[int] = set()
     for row in records:
-        code = row.get("codigo")
-        if code is None:
-            code = row.get("codigoModalidade")
-        if code in (None, ""):
-            continue
+        code = nested_first(row, "id", "codigo", "codigoModalidade")
         text = str(code).strip()
-        if text.isdigit():
-            codes.append(text)
-    return sorted({int(text) for text in codes})
+        if text.isascii() and text.isdigit() and int(text) > 0:
+            codes.add(int(text))
+    return sorted(codes)

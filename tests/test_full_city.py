@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import sqlite3
 
 import requests
 
@@ -66,3 +67,31 @@ def test_full_city_retries_with_token_only_after_unauthorized(tmp_path: Path):
     assert page is not None
     assert auth_used is True
     assert client.calls == [False, True]
+
+
+def test_ocds_bad_request_keeps_bounded_sanitized_diagnostic_without_checkpoint(tmp_path, monkeypatch):
+    config = FullCityConfig(db_path=tmp_path / "brusque", token="configured-secret")
+    crawler = FullCityCrawler(config)
+    crawler.warehouse.init_schema()
+    crawler.crawl_state.init_schema()
+    crawler.ops_store.init_schema()
+    resp = requests.Response()
+    resp.status_code = 400
+    resp.encoding = "utf-8"
+    resp._content = (
+        b'{"message":"Intervalo invalido. Authorization: Bearer echoed-secret configured-secret '
+        + b"x" * 900 + b'","password":"other-secret"}'
+    )
+
+    def fail(*args, **kwargs):
+        raise requests.HTTPError("bad request", response=resp)
+
+    monkeypatch.setattr(crawler.client, "fetch_page", fail)
+    crawler._crawl_ocds(["83102343000194"])
+    assert len(crawler.errors) == 1
+    message = crawler.errors[0]["message"]
+    assert "HTTP 400" in message and "Intervalo invalido" in message
+    assert not any(secret in message for secret in ("echoed-secret", "configured-secret", "other-secret"))
+    assert len(message) < 640
+    with sqlite3.connect(config.ops_db_path) as con:
+        assert con.execute("SELECT count(*) FROM ops_checkpoints").fetchone() == (0,)

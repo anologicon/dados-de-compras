@@ -23,7 +23,7 @@ def extract_records(payload: Any) -> list[dict[str, Any]]:
     if isinstance(payload, list):
         return [row for row in payload if isinstance(row, dict)]
     if isinstance(payload, dict):
-        for key in ("resultado", "records", "items", "data"):
+        for key in ("resultado", "records", "items", "data", "releases"):
             value = payload.get(key)
             if isinstance(value, list):
                 return [row for row in value if isinstance(row, dict)]

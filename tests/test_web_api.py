@@ -91,6 +91,19 @@ def test_schedule_validation_and_pause(client):
     assert client.post("/api/schedules", json=dict(values, frequency="once", due_at="2099-01-01T02:00:00Z")).status_code == 201
 
 
+def test_collection_sources_capability_and_api_validation(client):
+    add_city(client)
+    assert client.get("/api/status").json()["capabilities"]["collection_sources"] == ["comprasgov", "pncp_direct"]
+    run = dict(city_id="4202909", start_date="2026-01-01", end_date="2026-01-31")
+    schedule = dict(city_id="4202909", name="Diária", frequency="daily")
+    for route, body in (("runs", run), ("schedules", schedule)):
+        for value in ([], ["other"], ["pncp_direct", "pncp_direct"]):
+            assert client.post(f"/api/{route}", json=dict(body, collection_sources=value)).status_code == 422
+        assert client.post(f"/api/{route}", json=dict(body, collection_sources=["pncp_direct"])).status_code == 201
+    assert client.get("/api/runs").json()[0]["config"]["collection_sources"] == ["pncp_direct"]
+    assert client.get("/api/schedules").json()[0]["collection_sources"] == ["pncp_direct"]
+
+
 def test_missing_city_and_missing_snapshot_are_explicit(client):
     assert client.get("/api/cities/0000000/overview").status_code == 404
     add_city(client)

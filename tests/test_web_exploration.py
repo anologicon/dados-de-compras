@@ -106,6 +106,121 @@ def direct_publish(store):
     return purchase_detail(store, CITY, DIRECT_KEY)["snapshot"]
 
 
+def test_ocds_releases_are_projected_without_counting_as_city_purchases(tmp_path):
+    store, warehouse = make_direct_graph(tmp_path, [])
+    releases = [{"id": key, "buyer": {"id": "BR-CNPJ-10635424000186"}} for key in ("a", "b")]
+    raw = {"releases": releases, "links": {}}
+    warehouse.land_page(run_id="ocds", job_name="ocds", entity_name="ocds_release", page_number=1,
+                        request_params_json="{}", response_format="json", http_status=200,
+                        payload_json=stable_json(raw), payload_text=None, payload_hash=stable_hash(raw))
+    build_snapshot(store, CITY)
+    with connection(store, CITY) as con:
+        payloads = con.execute("SELECT payload_json FROM records WHERE entity='ocds_release'").fetchall()
+        assert {row[0] for row in payloads} == {stable_json(release) for release in releases}
+        assert con.execute("SELECT count(*) FROM purchases").fetchone() == (0,)
+
+
+def test_two_sources_prefer_direct_whole_payload_even_when_government_observed_later(direct_graph):
+    store, warehouse = direct_graph
+    gov = buy(control=DIRECT_CONTROL, valorTotalEstimado=95, valorTotalHomologado=80)
+    land(warehouse, "pncp_contratacao", [gov], run="government")
+    build_snapshot(store, CITY)
+    detail = purchase_detail(store, CITY, KEY)
+    assert json.loads(detail["purchase"]["payload_json"]) == direct_buy()
+    assert detail["purchase"]["estimated"] == 0
+    assert detail["purchase"]["awarded"] is None
+    reconciled = detail["conciliation"]
+    assert {row["source"] for row in reconciled["observations"]} == {"pncp_direct", "comprasgov"}
+    assert reconciled["selected_source"] == "pncp_direct"
+    assert reconciled["divergences"]["estimated"] == {"pncp_direct": 0, "comprasgov": 95}
+    with connection(store, CITY) as con:
+        assert con.execute("SELECT count(*) FROM purchases").fetchone() == (1,)
+
+
+@pytest.mark.parametrize("conflict", ["alias", "cancellation", "exclusion", "city"])
+def test_conflicting_two_source_purchase_stays_out_of_consolidated_view(tmp_path, conflict):
+    change = {
+        "alias": {},
+        "cancellation": {"situacaoCompraNome": "Anulada"},
+        "exclusion": {"contratacaoExcluida": True},
+        "city": {"unidadeOrgao": {"codigoIbge": 4205407}},
+    }[conflict]
+    store, warehouse = make_direct_graph(tmp_path, [("pncp_direct_contratacao", [direct_buy(**change)], None)])
+    land(warehouse, "pncp_contratacao", [buy(control=DIRECT_CONTROL)])
+    if conflict == "alias":
+        land(warehouse, "pncp_contratacao", [buy(control="different-control")], run="alias_conflict")
+    summary = build_snapshot(store, CITY)
+    reason = {
+        "alias": "Identificadores conflitantes",
+        "city": "Municípios conflitantes entre origens",
+        "cancellation": "Cancelamento ou exclusão conflitante entre origens",
+        "exclusion": "Cancelamento ou exclusão conflitante entre origens",
+    }[conflict]
+    assert summary["exclusion_reasons"] == {reason: 3 if conflict == "alias" else 2}
+    with connection(store, CITY) as con:
+        assert con.execute("SELECT count(*) FROM purchases").fetchone() == (0,)
+        assert con.execute("SELECT count(DISTINCT control) FROM purchase_candidates").fetchone()[0] == (2 if conflict == "alias" else 1)
+
+
+def test_two_sources_do_not_merge_different_controls_with_same_text_or_process(tmp_path):
+    other = DIRECT_CONTROL.replace("000123", "000124")
+    body = direct_buy(processo="12/2026")
+    store, warehouse = make_direct_graph(tmp_path, [("pncp_direct_contratacao", [body], None)])
+    gov = buy(control=other, processo="12/2026")
+    gov.update(objetoCompra=body["objetoCompra"], dataPublicacaoPncp=body["dataPublicacaoPncp"])
+    land(warehouse, "pncp_contratacao", [gov])
+    build_snapshot(store, CITY)
+    with connection(store, CITY) as con:
+        assert set(con.execute("SELECT purchase_key,control FROM purchases").fetchall()) == {
+            (KEY, other), (DIRECT_KEY, DIRECT_CONTROL),
+        }
+
+
+def test_pncp_unit_code_does_not_prove_municipality_by_matching_uasg(tmp_path):
+    body = direct_buy(unidadeOrgao={"codigoUnidade": "654321"})
+    store, warehouse = make_direct_graph(tmp_path, [("pncp_direct_contratacao", [body], None)])
+    land(warehouse, "uasg", [{"codigoUasg": "654321", "codigoMunicipioIbge": int(CITY)}])
+    build_snapshot(store, CITY)
+    with connection(store, CITY) as con:
+        assert con.execute("SELECT count(*) FROM purchases").fetchone() == (0,)
+
+
+def test_result_observations_with_same_business_identity_keep_both_origins(direct_graph):
+    store, warehouse = direct_graph
+    direct_land(warehouse, "pncp_direct_resultado_item",
+                [direct_result(numeroControlePNCPCompra=DIRECT_CONTROL)],
+                request_params={"_pncp_parent_control": DIRECT_CONTROL, "_pncp_parent_item": 1})
+    land(warehouse, "pncp_resultado_item", [dict(numeroControlePNCPCompra=DIRECT_CONTROL,
+                                                numeroItemPncp=1, sequencialResultado=1)])
+    snapshot = direct_publish(store)
+    observed = purchase_results(store, CITY, DIRECT_KEY, snapshot)
+    assert {json.loads(row["origin_json"])["entity"] for row in observed["items"]} == {
+        "pncp_direct_resultado_item", "pncp_resultado_item",
+    }
+
+
+def test_foreign_supplier_stays_observed_and_is_never_joined_as_cnpj(direct_graph):
+    store, warehouse = direct_graph
+    reference = "12345678000199"
+    body = direct_result(dataCancelamento="2026-01-13")
+    body["fornecedor"].update(tipoPessoa="PE", niFornecedor=reference)
+    direct_land(warehouse, "pncp_direct_resultado_item", [body],
+                request_params={"_pncp_parent_control": DIRECT_CONTROL, "_pncp_parent_item": 1})
+    direct_land(warehouse, "pncp_direct_item_contratacao", [direct_item(orcamentoSigiloso=True)],
+                request_params={"_pncp_parent_control": DIRECT_CONTROL})
+    land(warehouse, "fornecedor", [{"cnpj": reference, "nomeRazaoSocialFornecedor": "Outro fornecedor"}])
+    snapshot = direct_publish(store)
+    assert purchase_items(store, CITY, DIRECT_KEY, snapshot)["items"][0]["budget_sealed"] is True
+    award = purchase_results(store, CITY, DIRECT_KEY, snapshot)["items"][0]
+    assert award["supplier"]["kind"] == "foreign"
+    assert award["supplier"]["can_open"]
+    assert reference not in award["supplier"]["identifier"]
+    assert award["quantity"] == 0 and award["total"] == 0 and award["cancelled"]
+    detail = supplier_detail(store, CITY, DIRECT_KEY, snapshot, award["id"])
+    assert detail["registration_status"] == "missing"
+    assert detail["registrations"]["total"] == 0
+
+
 def test_connected_purchase_item_result_supplier_uses_existing_snapshot_only(graph):
     store, warehouse = graph
     land(warehouse, "pncp_item_contratacao", [item()])
@@ -243,7 +358,8 @@ def test_supplier_missing_cpf_masking_and_document_type_safety(graph):
     assert detail["registrations"]["total"] == 0
     assert document("01234567890", "PJ") is None
     assert document("foreign-12345678000199") is None
-    assert document("12345678000199", "PE") is None
+    assert document("12345678000199", "PE") == ("foreign", "12345678000199")
+    assert document("****-0199", "PE") is None
     assert document("123456789") is None  # do not pad a truncated identifier
 
 

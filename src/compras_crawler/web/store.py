@@ -106,6 +106,10 @@ class AppStore:
             columns = {row[1] for row in con.execute("PRAGMA table_info(runs)")}
             if "worker_failures" not in columns:
                 con.execute("ALTER TABLE runs ADD COLUMN worker_failures INTEGER NOT NULL DEFAULT 0")
+            schedule_columns = {row[1] for row in con.execute("PRAGMA table_info(schedules)")}
+            if "collection_sources_json" not in schedule_columns:
+                con.execute("""ALTER TABLE schedules ADD COLUMN collection_sources_json
+                    TEXT NOT NULL DEFAULT '["comprasgov"]'""")
 
     def city_dir(self, city_id: str) -> Path:
         # IDs are not filesystem paths, even when called outside the HTTP boundary.
@@ -273,18 +277,23 @@ class AppStore:
         schedule_id = str(uuid.uuid4())
         with self.connect() as con:
             con.execute("""INSERT INTO schedules(id,city_id,name,frequency,local_time,timezone,weekday,
-                window_days,next_due,start_date,end_date,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""", [
+                window_days,next_due,start_date,end_date,created_at,collection_sources_json)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""", [
                 schedule_id, values["city_id"], values["name"], values["frequency"], values["local_time"],
                 values["timezone"], values.get("weekday"), values["window_days"], stamp(due),
                 values.get("start_date"), values.get("end_date"), stamp(now),
+                json.dumps(values.get("collection_sources", ["comprasgov"])),
             ])
         return schedule_id
 
     def schedules(self) -> list[dict[str, Any]]:
         with self.connect() as con:
-            return [dict(row) for row in con.execute("""SELECT s.*, c.name city_name,
+            results = [dict(row) for row in con.execute("""SELECT s.*, c.name city_name,
                 EXISTS(SELECT 1 FROM runs r WHERE r.schedule_id=s.id) executed FROM schedules s
                 JOIN cities c ON c.id=s.city_id ORDER BY created_at DESC""")]
+            for row in results:
+                row["collection_sources"] = json.loads(row.pop("collection_sources_json"))
+            return results
 
     def enable_schedule(self, schedule_id: str, enabled: bool) -> None:
         with self.connect() as con:
@@ -309,7 +318,8 @@ class AppStore:
                 if pending is None:
                     today = now.astimezone(ZoneInfo(row["timezone"])).date()
                     config = dict(start_date=row["start_date"] or (today - timedelta(days=row["window_days"] - 1)).isoformat(),
-                                  end_date=row["end_date"] or today.isoformat())
+                                   end_date=row["end_date"] or today.isoformat(),
+                                   collection_sources=json.loads(row["collection_sources_json"]))
                     inserted = con.execute("""INSERT OR IGNORE INTO runs(id,city_id,status,config_json,created_at,
                         schedule_id,scheduled_for,available_at) VALUES (?,?,'queued',?,?,?,?,?)""", [
                         str(uuid.uuid4()), row["city_id"], json.dumps(config), stamp(now), row["id"], row["next_due"], stamp(now)])

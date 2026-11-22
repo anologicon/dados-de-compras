@@ -31,6 +31,11 @@ host é aceito; o cliente não segue redirects.
 | Quantidade de itens (conferência) | `GET https://pncp.gov.br/api/pncp/v1/orgaos/{cnpj}/compras/{ano}/{sequencial}/itens/quantidade` |
 | Resultados de um item | `GET https://pncp.gov.br/api/pncp/v1/orgaos/{cnpj}/compras/{ano}/{sequencial}/itens/{numeroItem}/resultados` |
 
+O domínio público observado em 2026-11-22 retorna um array com identificadores em
+`id` (20 modalidades ativas na resposta do piloto). O identificador de cada
+modalidade é enviado como `codigoModalidadeContratacao` na listagem; não usar
+ordem de resposta nem presumir um intervalo numérico fixo.
+
 ## 2. Convenções
 
 ### 2.1 Paginação da listagem

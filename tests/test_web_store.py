@@ -68,6 +68,23 @@ def test_once_schedule_disables_after_enqueue(store):
         store.enable_schedule(store.schedules()[0]["id"], True)
 
 
+def test_schedule_migration_defaults_only_legacy_rows_and_is_idempotent(store):
+    values = dict(city_id="4202909", name="Rotina", frequency="daily", local_time="02:00",
+                  timezone="UTC", window_days=30)
+    old = store.add_schedule(values, now=datetime(2026, 8, 1, tzinfo=UTC))
+    with store.connect() as con:
+        con.execute("ALTER TABLE schedules DROP COLUMN collection_sources_json")
+    store.init_schema()
+    new = store.add_schedule(dict(values, collection_sources=["pncp_direct"]), now=datetime(2026, 8, 1, tzinfo=UTC))
+    store.init_schema()
+    store.enable_schedule(old, False)
+    store.enable_schedule(old, True)
+    assert store.tick_schedules(NOW) == 2
+    assert {x["schedule_id"]: x["config"]["collection_sources"] for x in store.runs()} == {
+        old: ["comprasgov"], new: ["pncp_direct"],
+    }
+
+
 def test_dst_nonexistent_time_is_skipped():
     after = datetime(2026, 3, 8, 5, tzinfo=UTC)
     assert next_occurrence("daily", "02:30", "America/New_York", None, after) == datetime(2026, 3, 9, 6, 30, tzinfo=UTC)
