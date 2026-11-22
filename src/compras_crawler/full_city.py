@@ -19,6 +19,26 @@ DEFAULT_BASE_URL = "https://dadosabertos.compras.gov.br"
 DEFAULT_PNCP_MODALIDADES = tuple(range(1, 14))
 
 
+def ocds_error_detail(response: requests.Response, token: str | None) -> str:
+    """Keep a small validation message, never headers, raw HTML or raw JSON."""
+    if len(response.content) > 16_384:
+        return ""
+    try:
+        body = response.json()
+    except ValueError:
+        return ""
+    if not isinstance(body, dict):
+        return ""
+    detail = next((body[key] for key in ("message", "mensagem", "detail", "error")
+                   if isinstance(body.get(key), str) and body[key].strip()), "")
+    if token:
+        detail = detail.replace(token, "[redacted]")
+    # Do not preserve a credential-shaped suffix, even if echoed in prose.
+    detail = re.split(r"(?i)\b(?:bearer\s+|(?:authorization|password|senha|token|"
+                      r"cookie|secret|api[_ -]?key)\s*[:=])", detail, maxsplit=1)[0]
+    return " ".join(detail.split())[:320]
+
+
 @dataclass(frozen=True)
 class FullCityConfig:
     """Configuration for a best-effort full public API crawl for one municipality.
@@ -546,7 +566,10 @@ class FullCityCrawler:
                             throttle.pause_for(sleep_seconds)
                         self._sleep(sleep_seconds)
                     continue
-                self._record_error(job_name, int(params.get("pagina", 1) or 1), f"HTTP {status_code}: {exc}", None)
+                detail = (ocds_error_detail(exc.response, self.config.token)
+                          if status_code == 400 and path == "/modulo-ocds/1_releases" else "")
+                message = f"HTTP {status_code}: {exc}" + (f" — {detail}" if detail else "")
+                self._record_error(job_name, int(params.get("pagina", params.get("page", 1)) or 1), message, None)
                 return None, False
             except Exception as exc:  # noqa: BLE001
                 self._record_error(job_name, int(params.get("pagina", 1) or 1), str(exc), None)

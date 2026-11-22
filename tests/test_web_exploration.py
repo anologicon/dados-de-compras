@@ -106,6 +106,20 @@ def direct_publish(store):
     return purchase_detail(store, CITY, DIRECT_KEY)["snapshot"]
 
 
+def test_ocds_releases_are_projected_without_counting_as_city_purchases(tmp_path):
+    store, warehouse = make_direct_graph(tmp_path, [])
+    releases = [{"id": key, "buyer": {"id": "BR-CNPJ-10635424000186"}} for key in ("a", "b")]
+    raw = {"releases": releases, "links": {}}
+    warehouse.land_page(run_id="ocds", job_name="ocds", entity_name="ocds_release", page_number=1,
+                        request_params_json="{}", response_format="json", http_status=200,
+                        payload_json=stable_json(raw), payload_text=None, payload_hash=stable_hash(raw))
+    build_snapshot(store, CITY)
+    with connection(store, CITY) as con:
+        payloads = con.execute("SELECT payload_json FROM records WHERE entity='ocds_release'").fetchall()
+        assert {row[0] for row in payloads} == {stable_json(release) for release in releases}
+        assert con.execute("SELECT count(*) FROM purchases").fetchone() == (0,)
+
+
 def test_connected_purchase_item_result_supplier_uses_existing_snapshot_only(graph):
     store, warehouse = graph
     land(warehouse, "pncp_item_contratacao", [item()])
